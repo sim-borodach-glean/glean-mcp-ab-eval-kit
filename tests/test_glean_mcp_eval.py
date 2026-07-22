@@ -277,6 +277,154 @@ class CursorServerIsolationTest(unittest.TestCase):
                 sorted(disabled),
                 ["plugin-atlassian-atlassian", "plugin-glean-vnext-glean"],
             )
+class JudgeAliasNormalizationTest(unittest.TestCase):
+    def test_winner_prefix_aliases_and_explicit_null(self):
+        # Cursor emitted winner: null plus winner_overall/winner_quality/winner_tokens.
+        bg = {
+            "winner": None,
+            "winner_overall": "B",
+            "winner_quality": "B",
+            "winner_tokens": "A",
+            "efficiency_winner": None,
+        }
+        gme._normalize_judge_aliases(bg)
+        self.assertEqual(bg["winner"], "B")
+        self.assertEqual(bg["efficiency_winner"], "A")
+        self.assertEqual(bg["usefulness_winner"], "B")
+
+    def test_suffix_aliases_and_confidence_bucketing(self):
+        bg = {"overall_winner": "A", "token_efficiency_winner": "tie", "rationale": "because", "confidence": 0.9}
+        gme._normalize_judge_aliases(bg)
+        self.assertEqual(bg["winner"], "A")
+        self.assertEqual(bg["efficiency_winner"], "tie")
+        self.assertEqual(bg["reasoning"], "because")
+        self.assertEqual(bg["confidence"], "high")
+
+    def test_canonical_values_are_preserved(self):
+        bg = {"winner": "A", "efficiency_winner": "B", "reasoning": "keep", "confidence": "low"}
+        gme._normalize_judge_aliases(bg)
+        self.assertEqual(bg["winner"], "A")
+        self.assertEqual(bg["efficiency_winner"], "B")
+        self.assertEqual(bg["reasoning"], "keep")
+        self.assertEqual(bg["confidence"], "low")
+
+
+class PromptPrefixTest(unittest.TestCase):
+    def test_prefix_prepended_when_present(self):
+        out = gme.apply_prompt_prefix({"prompt_prefix": "Use the Atlassian MCP."}, "Question?")
+        self.assertEqual(out, "Use the Atlassian MCP.\n\nQuestion?")
+
+    def test_no_prefix_returns_prompt_unchanged(self):
+        self.assertEqual(gme.apply_prompt_prefix({}, "Question?"), "Question?")
+        self.assertEqual(gme.apply_prompt_prefix({"prompt_prefix": "  "}, "Question?"), "Question?")
+
+
+class ServerIsolationValidityTest(unittest.TestCase):
+    CFG = {
+        "arms": {
+            "glean": {
+                "expected_mcp_servers": ["glean_default"],
+                "forbidden_mcp_servers": ["plugin-atlassian-atlassian", "jira"],
+            },
+            "direct": {
+                "expected_mcp_servers": ["atlassian"],
+                "require_live_tool_servers": ["plugin-atlassian-atlassian"],
+                "forbidden_mcp_servers": ["glean_default", "glean"],
+            },
+        }
+    }
+
+    @staticmethod
+    def _run(servers):
+        return {
+            "success": True,
+            "transcript": {
+                "retrieval_attempted": bool(servers),
+                "mcp_servers_used": servers,
+                "models": {"Opus": 1},
+            },
+        }
+
+    def test_clean_arms_have_no_isolation_flags(self):
+        glean = self._run({"glean_default": 8})
+        direct = self._run({"plugin-atlassian-atlassian": 6})
+        self.assertEqual(gme.validity_flags(glean, direct, self.CFG), [])
+
+    def test_direct_via_workspace_atlassian_server_is_clean(self):
+        # After isolation the direct arm reaches the workspace mcp.json 'atlassian'
+        # server (not the plugin); union(expected, require_live) must accept it.
+        glean = self._run({"glean_default": 18})
+        direct = self._run({"atlassian": 30})
+        self.assertEqual(gme.validity_flags(glean, direct, self.CFG), [])
+
+    def test_direct_reaching_glean_is_flagged(self):
+        # The real contamination: 'direct' arm used glean_default (forbidden + unexpected).
+        glean = self._run({"glean_default": 8})
+        direct = self._run({"glean_default": 14})
+        flags = gme.validity_flags(glean, direct, self.CFG)
+        self.assertIn("direct_forbidden_server", flags)
+        self.assertIn("direct_unexpected_server", flags)
+        self.assertNotIn("glean_forbidden_server", flags)
+
+    def test_glean_reaching_atlassian_is_flagged(self):
+        glean = self._run({"glean_default": 12, "plugin-atlassian-atlassian": 8})
+        direct = self._run({"plugin-atlassian-atlassian": 6})
+        flags = gme.validity_flags(glean, direct, self.CFG)
+        self.assertIn("glean_forbidden_server", flags)
+        self.assertIn("glean_unexpected_server", flags)
+
+    def test_no_cfg_preserves_legacy_behavior(self):
+        glean = self._run({"glean_default": 8})
+        direct = self._run({"glean_default": 14})
+        self.assertEqual(gme.validity_flags(glean, direct), [])
+
+    def test_no_retrieval_does_not_add_isolation_flag(self):
+        empty = self._run({})
+        flags = gme.validity_flags(empty, empty, self.CFG)
+        self.assertIn("glean_no_retrieval", flags)
+        self.assertNotIn("glean_unexpected_server", flags)
+
+
+class NumericScoreNormalizationTest(unittest.TestCase):
+    def test_coerce_score_clamps_and_parses(self):
+        self.assertEqual(gme._coerce_score(4), 4)
+        self.assertEqual(gme._coerce_score(4.6), 5)
+        self.assertEqual(gme._coerce_score(9), 5)      # clamp high
+        self.assertEqual(gme._coerce_score(0), 1)      # clamp low
+        self.assertEqual(gme._coerce_score("4/5"), 4)  # parse from string
+        self.assertIsNone(gme._coerce_score("n/a"))
+        self.assertIsNone(gme._coerce_score(True))     # bools are not scores
+        self.assertIsNone(gme._coerce_score(None))
+
+    def test_flat_scores_are_clamped_in_place(self):
+        bg = {"completeness_a": 7, "completeness_b": "3", "groundedness_a": 5, "groundedness_b": 4}
+        gme._normalize_numeric_scores(bg)
+        self.assertEqual(bg["completeness_a"], 5)
+        self.assertEqual(bg["completeness_b"], 3)
+        self.assertEqual(bg["groundedness_a"], 5)
+
+    def test_nested_and_aliased_scores(self):
+        # Cursor-style nested scores object with varied casing.
+        bg = {"scores": {"completeness": {"a": 4, "b": 2}, "groundedness": {"A": 5, "B": 3}}}
+        gme._normalize_numeric_scores(bg)
+        self.assertEqual(bg["completeness_a"], 4)
+        self.assertEqual(bg["completeness_b"], 2)
+        self.assertEqual(bg["groundedness_a"], 5)
+        self.assertEqual(bg["groundedness_b"], 3)
+
+    def test_missing_scores_stay_absent(self):
+        bg = {"winner": "A"}
+        gme._normalize_numeric_scores(bg)
+        self.assertNotIn("completeness_a", bg)
+        self.assertNotIn("groundedness_b", bg)
+
+    def test_judge_prompt_requests_integer_scores(self):
+        meta = {"id": "Q1", "dept": "Eng", "prompt": "Question?"}
+        run = {"_answer": "answer", "usage": {"input_tokens": 1, "output_tokens": 1}}
+        prompt = gme.judge_prompt(meta, run, run)
+        self.assertIn("completeness_a", prompt)
+        self.assertIn("groundedness_b", prompt)
+        self.assertIn("1-5", prompt)
 
 
 class ServerPresentTest(unittest.TestCase):

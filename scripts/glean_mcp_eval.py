@@ -730,6 +730,18 @@ def render_wrapper(wrapper: str, row: Dict[str, str]) -> str:
     return out
 
 
+def apply_prompt_prefix(acfg: Dict[str, Any], prompt_text: str) -> str:
+    """Prepend an arm's optional `prompt_prefix` steering instruction.
+
+    Used to name the retrieval tool an arm should use (e.g. "Use the Atlassian
+    MCP..."). Symmetric across arms and orthogonal to isolation: the
+    server-isolation guardrail still flags any run that reaches another server,
+    so steering guides but never hides contamination.
+    """
+    prefix = str((acfg or {}).get("prompt_prefix") or "").strip()
+    return prefix + "\n\n" + prompt_text if prefix else prompt_text
+
+
 def command_run(args: argparse.Namespace) -> int:
     config_path, cfg = load_config(args.config)
     root = repo_root_for_config(config_path)
@@ -750,6 +762,12 @@ def command_run(args: argparse.Namespace) -> int:
     for i, row in enumerate(prompts, 1):
         pid = safe_prompt_id(row["ID"])
         prompt_text = render_wrapper(wrapper, row)
+        # Optional per-arm steering: prepend an instruction naming the retrieval
+        # tool the arm is meant to use (e.g. "Use the Atlassian MCP..."). This
+        # reduces tool-selection noise between arms; the server-isolation
+        # guardrail still flags any run that ignores it and reaches another
+        # server, so steering never masks contamination.
+        prompt_text = apply_prompt_prefix(acfg, prompt_text)
         run_dir = out_root / pid
         metadata = {
             "id": row.get("ID"),
@@ -844,6 +862,95 @@ def blind_assignment(participant_id: str, prompt_id: str) -> bool:
     h = hashlib.sha256(f"{participant_id}/{prompt_id}".encode("utf-8")).hexdigest()
     return int(h[:8], 16) % 2 == 0
 
+def _pick_alias(bg: Dict[str, Any], *keys: str) -> Any:
+    """Return the first present, non-empty value among keys.
+
+    Schema-free hosts vary key names and sometimes emit an explicit null for the
+    canonical key, so callers treat any falsy value as "missing".
+    """
+    for k in keys:
+        v = bg.get(k)
+        if v not in (None, "", [], {}):
+            return v
+    return None
+
+
+def _normalize_judge_aliases(bg: Dict[str, Any]) -> None:
+    """In-place: map a schema-free judge's output onto the kit's canonical keys.
+
+    Claude Code fills winner/efficiency_winner/reasoning/confidence from the
+    enforced JSON schema. Cursor ignores the schema and emits prose-driven
+    variants (e.g. winner_overall, winner_quality, winner_tokens) and may set
+    winner: null outright, so we fall back on any falsy value rather than only a
+    missing key. Numeric confidence is bucketed to high/medium/low.
+    """
+    if not isinstance(bg, dict):
+        return
+    if not bg.get("winner"):
+        bg["winner"] = _pick_alias(bg, "overall_winner", "winner_overall", "quality_winner", "winner_quality")
+    if not bg.get("efficiency_winner"):
+        bg["efficiency_winner"] = _pick_alias(bg, "token_efficiency_winner", "winner_tokens", "token_winner", "efficiency")
+    if not bg.get("usefulness_winner"):
+        bg["usefulness_winner"] = _pick_alias(bg, "usefulness", "quality_winner", "winner_quality", "winner")
+    if not bg.get("reasoning"):
+        bg["reasoning"] = _pick_alias(bg, "quality_reasoning", "rationale", "explanation", "justification")
+    conf = bg.get("confidence")
+    if not isinstance(conf, bool) and isinstance(conf, (int, float)):
+        bg["confidence"] = "high" if float(conf) >= 0.8 else "medium" if float(conf) >= 0.5 else "low"
+
+
+def _coerce_score(value: Any) -> Optional[int]:
+    """Coerce a judge score to an int in [1, 5], or None if it isn't usable."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        n = int(round(value))
+    elif isinstance(value, str):
+        m = re.search(r"-?\d+(?:\.\d+)?", value)
+        if not m:
+            return None
+        n = int(round(float(m.group())))
+    else:
+        return None
+    return max(1, min(5, n))
+
+
+def _normalize_numeric_scores(bg: Dict[str, Any]) -> None:
+    """In-place: populate blind completeness_{a,b}/groundedness_{a,b} integers.
+
+    Claude Code fills these from the enforced JSON schema. Schema-free hosts such
+    as Cursor emit only what the prose asked for and may nest the scores (e.g.
+    {"scores": {"completeness": {"a": 4, "b": 5}}}) or vary casing. Map those
+    shapes to the kit's flat keys and clamp to integers in [1, 5]; leave the
+    field absent when no usable value is found so it renders as blank, not 0.
+    """
+    if not isinstance(bg, dict):
+        return
+    nested: Dict[str, Any] = {}
+    for container_key in ("scores", "quality_scores", "ratings"):
+        val = bg.get(container_key)
+        if isinstance(val, dict):
+            nested = val
+            break
+    for dim in ("completeness", "groundedness"):
+        dim_obj = nested.get(dim) if isinstance(nested.get(dim), dict) else {}
+        for side in ("a", "b"):
+            target = f"{dim}_{side}"
+            existing = _coerce_score(bg.get(target))
+            if existing is not None:
+                bg[target] = existing
+                continue
+            candidate = (
+                bg.get(f"{dim}_{side.upper()}")
+                or bg.get(f"{dim}_answer_{side}")
+                or dim_obj.get(side)
+                or dim_obj.get(side.upper())
+                or dim_obj.get(f"answer_{side}")
+            )
+            coerced = _coerce_score(candidate)
+            if coerced is not None:
+                bg[target] = coerced
+
 
 def deblind_grade(bg: Dict[str, Any], glean_is_a: bool) -> Dict[str, Any]:
     # Translate an A/B judge result back into glean/direct keys so downstream
@@ -932,6 +1039,17 @@ def judge_prompt(meta: Dict[str, Any], run_a: Dict[str, Any], run_b: Dict[str, A
         f"Query: {meta.get('prompt')}\n\n"
         f"{a_tok}Answer A:\n{run_a.get('_answer', '')}\n\n"
         f"{b_tok}Answer B:\n{run_b.get('_answer', '')}\n\n"
+        # Hosts with JSON-schema enforcement (e.g. Claude Code) fill the numeric
+        # score fields from the schema, but schema-free hosts (e.g. Cursor) only
+        # emit what the prose asks for. Spell the integer scores out explicitly so
+        # completeness/groundedness are populated regardless of host.
+        "Also rate each answer on two dimensions using an integer from 1 (worst) "
+        "to 5 (best):\n"
+        "- completeness: how fully the answer addresses the query.\n"
+        "- groundedness: how well claims are supported by cited/verifiable sources.\n"
+        "Report them as the JSON fields completeness_a, completeness_b, "
+        "groundedness_a, and groundedness_b (integers 1-5), where _a is Answer A "
+        "and _b is Answer B.\n\n"
         'Return the required JSON object only, using "A", "B", or "tie" for the winner fields.'
     )
 
@@ -983,12 +1101,36 @@ def command_grade(args: argparse.Namespace) -> int:
                 host=cfg.get("judge_host") or "claude-code",
             )
             raw = read_json(Path(rec["raw_output_path"])) if rec.get("raw_output_path") and Path(rec["raw_output_path"]).exists() else {}
-            blind_grade = raw.get("structured_output")
-            if not blind_grade and isinstance(raw.get("result"), str):
-                try:
-                    blind_grade = json.loads(raw["result"])
-                except Exception:
-                    blind_grade = None
+            # Claude returns one JSON object; Cursor's stream-json adapter stores
+            # a list of events, with the final answer in the result event. Cursor
+            # also does not enforce --json-schema, so accept its equivalent
+            # quality_* fields and normalize them to the kit schema below.
+            parse_obj = raw
+            if isinstance(raw, list):
+                result_events = [e for e in raw if isinstance(e, dict) and e.get("type") == "result"]
+                parse_obj = result_events[-1] if result_events else {}
+            blind_grade = parse_obj.get("structured_output") if isinstance(parse_obj, dict) else None
+            if not blind_grade and isinstance(parse_obj, dict) and isinstance(parse_obj.get("result"), str):
+                result_text = parse_obj["result"]
+                candidates = re.findall(r"```(?:json)?\\s*(\\{.*?\\})\\s*```", result_text, flags=re.DOTALL | re.IGNORECASE)
+                # Cursor may omit fences and prepend analysis. Try every opening
+                # brace from the end, using raw_decode to tolerate trailing prose.
+                candidates += [result_text[i:] for i, ch in enumerate(result_text) if ch == "{"]
+                for candidate in reversed(candidates):
+                    try:
+                        parsed, _ = json.JSONDecoder().raw_decode(candidate.strip())
+                        if isinstance(parsed, dict):
+                            blind_grade = parsed
+                            break
+                    except Exception:
+                        continue
+            if isinstance(blind_grade, dict):
+                _normalize_judge_aliases(blind_grade)
+                # Numeric quality scores. Schema-free hosts (Cursor) may nest the
+                # scores or vary the key casing; normalize to the kit's flat
+                # completeness_{a,b}/groundedness_{a,b} integers so the aggregate
+                # quality table is populated instead of showing 0.00.
+                _normalize_numeric_scores(blind_grade)
             if not isinstance(blind_grade, dict):
                 failures += 1
                 blind_grade = None
@@ -1010,7 +1152,50 @@ def command_grade(args: argparse.Namespace) -> int:
     return 0 if failures == 0 else 1
 
 
-def validity_flags(glean: Dict[str, Any], direct: Dict[str, Any]) -> List[str]:
+def _server_isolation_flags(cfg: Optional[Dict[str, Any]], arm: str, rec: Dict[str, Any]) -> List[str]:
+    """Flag a run whose MCP server usage escaped its arm's isolation.
+
+    Cursor merges the global ~/.cursor/mcp.json and installed plugins into every
+    workspace and cursor-agent has no --strict-mcp-config flag, so an arm can
+    call a server it was never meant to (e.g. the 'direct' arm reaching
+    glean_default, or the 'glean' arm reaching an Atlassian plugin). Those rows
+    are not a valid A/B comparison and must be excluded from headline stats.
+
+    Sanctioned servers are expected_mcp_servers UNION require_live_tool_servers,
+    so reaching the target via the workspace mcp.json server or an equivalent
+    plugin both count as clean.
+    """
+    out: List[str] = []
+    if not cfg:
+        return out
+    acfg = (cfg.get("arms") or {}).get(arm) or {}
+    used = {
+        normalize_server_name(k)
+        for k in ((rec.get("transcript") or {}).get("mcp_servers_used") or {})
+    }
+    if not used:
+        return out
+    forbidden = {normalize_server_name(x) for x in (acfg.get("forbidden_mcp_servers") or [])}
+    # Sanctioned = expected_mcp_servers UNION require_live_tool_servers: an arm may
+    # legitimately reach its target via the workspace mcp.json server or an
+    # equivalent plugin (e.g. 'atlassian' vs 'plugin-atlassian-atlassian').
+    expected = {
+        normalize_server_name(x)
+        for x in (
+            list(acfg.get("expected_mcp_servers") or [])
+            + list(acfg.get("require_live_tool_servers") or [])
+        )
+    }
+    if used & forbidden:
+        out.append(f"{arm}_forbidden_server")
+    if expected and (used - expected):
+        out.append(f"{arm}_unexpected_server")
+    return out
+
+
+def validity_flags(
+    glean: Dict[str, Any], direct: Dict[str, Any], cfg: Optional[Dict[str, Any]] = None
+) -> List[str]:
     flags = []
     if not glean.get("success"):
         flags.append("glean_run_failed")
@@ -1024,10 +1209,12 @@ def validity_flags(glean: Dict[str, Any], direct: Dict[str, Any]) -> List[str]:
     dm = set((direct.get("transcript") or {}).get("models", {}).keys())
     if gm and dm and gm != dm:
         flags.append("model_mismatch")
+    flags.extend(_server_isolation_flags(cfg, "glean", glean))
+    flags.extend(_server_isolation_flags(cfg, "direct", direct))
     return flags
 
 
-def collect_aggregate_rows(res: Path) -> List[Dict[str, Any]]:
+def collect_aggregate_rows(res: Path, cfg: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     rows = []
     for pdir in participant_dirs(res, None):
         for pid, glean_dir, direct_dir in paired_prompt_dirs(pdir):
@@ -1038,7 +1225,7 @@ def collect_aggregate_rows(res: Path) -> List[Dict[str, Any]]:
             meta = glean.get("_metadata") or direct.get("_metadata") or {}
             grade_path = pdir / "grades" / pid / "grade.json"
             grade = read_json(grade_path).get("grade") if grade_path.exists() else {}
-            flags = validity_flags(glean, direct)
+            flags = validity_flags(glean, direct, cfg)
             gt = int(glean.get("total_tokens") or 0)
             dtok = int(direct.get("total_tokens") or 0)
             gcost = float(glean.get("computed_cost_usd") or 0.0)
@@ -1047,8 +1234,15 @@ def collect_aggregate_rows(res: Path) -> List[Dict[str, Any]]:
             d_usage = direct.get("usage") or {}
             g_marginal = int(g_usage.get("input_tokens", 0)) + int(g_usage.get("output_tokens", 0))
             d_marginal = int(d_usage.get("input_tokens", 0)) + int(d_usage.get("output_tokens", 0))
-            g_rcost = float(glean.get("total_cost_usd_reported_by_claude") or 0.0)
-            d_rcost = float(direct.get("total_cost_usd_reported_by_claude") or 0.0)
+            g_rcost_raw = glean.get("total_cost_usd_reported_by_claude")
+            d_rcost_raw = direct.get("total_cost_usd_reported_by_claude")
+            g_rcost = float(g_rcost_raw) if isinstance(g_rcost_raw, (int, float)) else ""
+            d_rcost = float(d_rcost_raw) if isinstance(d_rcost_raw, (int, float)) else ""
+            g_reported_savings = (
+                round((d_rcost - g_rcost) / d_rcost * 100.0, 2)
+                if isinstance(g_rcost, (int, float)) and isinstance(d_rcost, (int, float)) and d_rcost
+                else ""
+            )
             g_lat = glean.get("duration_ms_reported_by_claude")
             d_lat = direct.get("duration_ms_reported_by_claude")
             rows.append({
@@ -1063,9 +1257,9 @@ def collect_aggregate_rows(res: Path) -> List[Dict[str, Any]]:
                 "glean_cost_usd": gcost,
                 "direct_cost_usd": dcost,
                 "cost_savings_pct": round((dcost - gcost) / dcost * 100.0, 2) if dcost else "",
-                "glean_reported_cost_usd": round(g_rcost, 6),
-                "direct_reported_cost_usd": round(d_rcost, 6),
-                "reported_cost_savings_pct": round((d_rcost - g_rcost) / d_rcost * 100.0, 2) if d_rcost else "",
+                "glean_reported_cost_usd": round(g_rcost, 6) if isinstance(g_rcost, (int, float)) else "",
+                "direct_reported_cost_usd": round(d_rcost, 6) if isinstance(d_rcost, (int, float)) else "",
+                "reported_cost_savings_pct": g_reported_savings,
                 "glean_marginal_tokens": g_marginal,
                 "direct_marginal_tokens": d_marginal,
                 "marginal_token_savings_pct": round((d_marginal - g_marginal) / d_marginal * 100.0, 2) if d_marginal else "",
@@ -1128,7 +1322,7 @@ def command_report(args: argparse.Namespace) -> int:
     config_path, cfg = load_config(args.config)
     res = results_dir(config_path, cfg)
     res.mkdir(parents=True, exist_ok=True)
-    rows = collect_aggregate_rows(res)
+    rows = collect_aggregate_rows(res, cfg)
     csv_path = res / "aggregate_rows.csv"
     if rows:
         with csv_path.open("w", encoding="utf-8", newline="") as f:
@@ -1153,12 +1347,17 @@ def command_report(args: argparse.Namespace) -> int:
     d_fixed_avg = col_mean("direct_cache_write_tokens")
     gt_avg = col_mean("glean_total_tokens")
     dt_avg = col_mean("direct_total_tokens")
-    # Cost: reported = Claude Code's own per-run figure (primary); list = normalized rate card.
+    # Cost: reported = host-emitted billed/per-run figure when available; list = normalized rate card.
+    reported_cost_rows = [
+        r for r in denom_rows
+        if r.get("glean_reported_cost_usd") not in ("", None) and r.get("direct_reported_cost_usd") not in ("", None)
+    ]
+    reported_cost_available = bool(reported_cost_rows)
     g_rc_avg = col_mean("glean_reported_cost_usd")
     d_rc_avg = col_mean("direct_reported_cost_usd")
     gc_avg = col_mean("glean_cost_usd")
     dc_avg = col_mean("direct_cost_usd")
-    # Latency: wall-clock milliseconds reported by Claude Code.
+    # Latency: wall-clock milliseconds reported by the host adapter, when available.
     g_lat_avg = col_mean("glean_latency_ms")
     d_lat_avg = col_mean("direct_latency_ms")
 
@@ -1170,7 +1369,7 @@ def command_report(args: argparse.Namespace) -> int:
 
     marginal_savings = pct_lower(d_marg_avg, g_marg_avg)
     total_token_savings = pct_lower(dt_avg, gt_avg)
-    reported_cost_savings = pct_lower(d_rc_avg, g_rc_avg)
+    reported_cost_savings = pct_lower(d_rc_avg, g_rc_avg) if reported_cost_available else None
     list_cost_savings = pct_lower(dc_avg, gc_avg)
     latency_savings = pct_lower(d_lat_avg, g_lat_avg)
     invalid_count = len(rows) - len(valid)
@@ -1180,8 +1379,25 @@ def command_report(args: argparse.Namespace) -> int:
             return f" (95% CI {ci[0]:.1f} to {ci[1]:.1f}%, n={len(denom_rows)}, bootstrap)"
         return f" (n={len(denom_rows)}; need ≥2 rows for a CI)"
 
-    reported_cost_ci = bootstrap_savings_ci([(r["glean_reported_cost_usd"], r["direct_reported_cost_usd"]) for r in denom_rows])
+    reported_cost_ci = bootstrap_savings_ci([(r["glean_reported_cost_usd"], r["direct_reported_cost_usd"]) for r in reported_cost_rows]) if reported_cost_available else None
     marginal_ci = bootstrap_savings_ci([(r["glean_marginal_tokens"], r["direct_marginal_tokens"]) for r in denom_rows])
+    host_name = str(cfg.get("host") or "configured host")
+    host_label = host_name.replace("-", " ").title()
+    reported_cost_row = (
+        f"| Avg host-reported cost / task | ${g_rc_avg:,.4f} | ${d_rc_avg:,.4f} | {reported_cost_savings:.1f}% lower for Glean |"
+        if reported_cost_available and reported_cost_savings is not None
+        else "| Avg host-reported cost / task | N/A | N/A | N/A |"
+    )
+    reported_cost_note = (
+        f"> Host-reported cost savings for Glean: **{reported_cost_savings:.1f}%**{ci_str(reported_cost_ci)}."
+        if reported_cost_available and reported_cost_savings is not None
+        else f"> Host-reported billed cost is unavailable for these `{host_name}` runs because the {host_label} adapter did not emit per-run cost. Use list-price-normalized cost for cost comparison."
+    )
+    token_guidance = (
+        "Prefer marginal tokens + host-reported cost for headline claims."
+        if reported_cost_available
+        else "Prefer marginal tokens + list-price-normalized cost for headline claims because host-reported cost is unavailable."
+    )
     md = f"""# Aggregate summary
 
 Generated: {now_iso()}
@@ -1197,16 +1413,16 @@ Eval: `{cfg.get('eval_name', '')}`
 
 ## Cost
 
-Primary metric is the cost Claude Code reports per run. List-price-normalized cost applies the configurable `pricing_per_million` rates uniformly across both arms.
+Host-reported cost is shown only when the selected run host emits a per-run billed-cost field. List-price-normalized cost applies the configurable `pricing_per_million` rates uniformly across both arms.
 
 | Metric | Glean MCP | Direct MCP | Delta |
 |---|---:|---:|---:|
-| Avg reported cost / task | ${g_rc_avg:,.4f} | ${d_rc_avg:,.4f} | {reported_cost_savings:.1f}% lower for Glean |
+{reported_cost_row}
 | Avg list-price-normalized cost / task | ${gc_avg:,.4f} | ${dc_avg:,.4f} | {list_cost_savings:.1f}% lower for Glean |
 
-> List-price-normalized cost is a rate-card comparison, not billed spend. Verify `pricing_per_million` against current model list prices; it can diverge sharply from reported cost when cache-creation tokens dominate.
+> List-price-normalized cost is a rate-card comparison, not billed spend. Verify `pricing_per_million` against current model list prices; it can diverge from host-reported cost when cache-creation tokens dominate or when the host does not expose billed cost.
 >
-> Reported-cost savings for Glean: **{reported_cost_savings:.1f}%**{ci_str(reported_cost_ci)}.
+{reported_cost_note}
 
 ## Tokens
 
@@ -1218,7 +1434,7 @@ Marginal = per-prompt work (input + output). Fixed = per-session cache creation 
 | Avg fixed (cache-creation) tokens / task | {g_fixed_avg:,.0f} | {d_fixed_avg:,.0f} | — |
 | Avg total tokens / task | {gt_avg:,.0f} | {dt_avg:,.0f} | {total_token_savings:.1f}% lower for Glean |
 
-> Prefer marginal tokens + reported cost for headline claims. Raw totals are dominated by per-session cache creation and can mislead.
+> {token_guidance} Raw totals are dominated by per-session cache creation and can mislead.
 >
 > Marginal-token savings for Glean: **{marginal_savings:.1f}%**{ci_str(marginal_ci)}.
 
@@ -1246,6 +1462,8 @@ Rows with any of these flags should be reviewed/excluded before executive claims
 - `glean_no_retrieval`
 - `direct_no_retrieval`
 - `model_mismatch`
+- `glean_forbidden_server` / `direct_forbidden_server` (arm called a server on its `forbidden_mcp_servers` list)
+- `glean_unexpected_server` / `direct_unexpected_server` (arm called a server outside `require_live_tool_servers`/`expected_mcp_servers` — cross-arm contamination)
 
 Detailed rows: [`aggregate_rows.csv`](aggregate_rows.csv)
 """
@@ -1258,7 +1476,7 @@ Detailed rows: [`aggregate_rows.csv`](aggregate_rows.csv)
         "aggregate_summary_md": str(summary_path),
         "avg_marginal_token_savings_pct": round(marginal_savings, 2),
         "avg_total_token_savings_pct": round(total_token_savings, 2),
-        "avg_reported_cost_savings_pct": round(reported_cost_savings, 2),
+        "avg_reported_cost_savings_pct": round(reported_cost_savings, 2) if reported_cost_savings is not None else None,
         "avg_list_cost_savings_pct": round(list_cost_savings, 2),
         "avg_latency_savings_pct": round(latency_savings, 2),
         "reported_cost_savings_ci_pct": reported_cost_ci,
@@ -1286,7 +1504,7 @@ def command_package(args: argparse.Namespace) -> int:
     for p in sorted(res.rglob("*")):
         if not p.is_file():
             continue
-        if p == zip_path:
+        if p in (zip_path, manifest_path):
             continue
         rel = p.relative_to(res).as_posix()
         files.append({"path": rel, "sha256": sha256_file(p), "bytes": p.stat().st_size})
