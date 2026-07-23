@@ -73,9 +73,21 @@ required state.
 ## Runbook
 
 ```bash
-# 0. Configure
+# 0a. Authenticate the MCP servers FOR THE cursor-agent CLI (one time).
+#     The desktop Cursor app's plugin OAuth does NOT carry into headless
+#     cursor-agent — a bare `cursor-agent -p` returns NEEDS_AUTH for Atlassian
+#     until you log in here. `atlassian` and `glean_default` must be in
+#     ~/.cursor/mcp.json (see config/mcp.plugin_ab.example.json for the entries).
+cursor-agent mcp list                 # both should appear
+cursor-agent mcp login atlassian      # completes an interactive browser OAuth
+cursor-agent mcp login glean_default  # if it shows requires_authentication
+# Note: the Atlassian *plugin* server (plugin-atlassian-atlassian) CANNOT be
+# CLI-logged-in, which is why the write path uses the bare `atlassian` remote.
+
+# 0b. Configure the eval
 cp config/eval.config.plugin.example.json eval.config.json
-# Edit eval.config.json → set sandbox.jira_issue_key (a throwaway issue you own).
+# Edit eval.config.json → set sandbox.jira_issue_key (a throwaway issue you own,
+# in a project that does NOT post to a shared Slack channel on create/edit).
 # Writes are allow-listed ONLY against the sandbox; no default means no accidents.
 
 # 1. See what your Cursor install currently exposes and which arm you're ready for

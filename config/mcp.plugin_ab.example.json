@@ -1,0 +1,14 @@
+{
+  "_comment": "Per-arm MCP servers staged into each plugin-A/B arm workspace (Cursor shape). Glean read + Atlassian write, both authenticated via the cursor-agent CLI (`cursor-agent mcp login glean_default` / `cursor-agent mcp login atlassian`) so they work in HEADLESS runs — the desktop plugin's OAuth does NOT carry into cursor-agent. The Glean PLUGIN (plugin-glean-vnext-glean) is not listed here; it is toggled by real install/uninstall and gated by scripts/plugin_gate.py.",
+  "mcpServers": {
+    "glean_default": {
+      "url": "https://scio-prod-be.glean.com/mcp/default",
+      "headers": {
+        "X-Glean-Metadata": "mdm"
+      }
+    },
+    "atlassian": {
+      "url": "https://mcp.atlassian.com/v1/sse"
+    }
+  }
+}
