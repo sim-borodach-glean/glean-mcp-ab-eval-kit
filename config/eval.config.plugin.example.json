@@ -1,0 +1,108 @@
+{
+  "_comment": "Cursor Glean-PLUGIN A/B eval. The ONLY variable between arms is the Glean plugin (plugin-glean-vnext-glean). Both arms hold constant: Glean read (glean_default) + Atlassian write (plugin-atlassian-atlassian). The plugin CANNOT be toggled programmatically for headless cursor-agent (see docs/PLUGIN_TEST.md), so arm1 requires the operator to uninstall the plugin and arm2 requires it installed; scripts/plugin_ab.py gates each arm with a live presence probe that must pass before the arm runs. This is a WRITE-capable eval: every write targets the configured sandbox and must be reverted by the task itself.",
+
+  "eval_name": "cursor-glean-plugin-ab",
+  "host": "cursor",
+  "prompts_file": "prompts/golden_prompts.plugin.example.tsv",
+  "results_dir": "results",
+  "model": "claude-opus-4-8-high",
+  "plugin_probe_model": "claude-opus-4-8-high",
+
+  "judge_model": "claude-opus-4-8-high",
+  "judge_host": "cursor",
+  "judge_mcp_config": "config/mcp.none.json",
+  "judge_hide_tokens": false,
+
+  "plugin_server_id": "plugin-glean-vnext-glean",
+  "arm_pair": ["arm1_baseline", "arm2_plugin"],
+
+  "sandbox": {
+    "_comment": "REQUIRED before running writes. Point every write at throwaway targets you own. No default, so a misconfigured run cannot mutate real data.",
+    "jira_project_key": "",
+    "jira_issue_key": "",
+    "confluence_space_key": ""
+  },
+
+  "max_turns": 16,
+  "prompt_wrapper": "Complete the following enterprise task. You MAY use Atlassian write tools, but ONLY against the designated sandbox target named in the task, and you MUST revert every change you make before finishing (restore the original field value, or transition back to the original status) so the system is left exactly as you found it. Never write to anything outside the sandbox. Use Glean to gather the knowledge you need. At the end, report: (1) what you changed, (2) proof you reverted it, (3) the sources you used.\n\nTask:\n{prompt}",
+
+  "preflight_timeout_seconds": 300,
+  "run_timeout_seconds": 1800,
+  "pricing_per_million": {
+    "input_tokens": 5.0,
+    "output_tokens": 25.0,
+    "cache_creation_input_tokens": 6.25,
+    "cache_read_input_tokens": 0.5
+  },
+
+  "arms": {
+    "arm1_baseline": {
+      "label": "Baseline: Atlassian-write + Glean-read (no plugin)",
+      "requires_plugin": "absent",
+      "mcp_config": "config/mcp.none.json",
+      "expected_mcp_servers": ["glean_default", "plugin-atlassian-atlassian"],
+      "require_live_tool_servers": ["glean_default", "plugin-atlassian-atlassian"],
+      "forbidden_mcp_servers": ["plugin-glean-vnext-glean"],
+      "allowed_tools": [
+        "mcp__glean_default__search",
+        "mcp__glean_default__read_document",
+        "mcp__glean_default__chat",
+        "mcp__glean_default__employee_search",
+        "mcp__plugin-atlassian-atlassian__search",
+        "mcp__plugin-atlassian-atlassian__getAccessibleAtlassianResources",
+        "mcp__plugin-atlassian-atlassian__getJiraIssue",
+        "mcp__plugin-atlassian-atlassian__searchJiraIssuesUsingJql",
+        "mcp__plugin-atlassian-atlassian__getConfluencePage",
+        "mcp__plugin-atlassian-atlassian__getTransitionsForJiraIssue",
+        "mcp__plugin-atlassian-atlassian__editJiraIssue",
+        "mcp__plugin-atlassian-atlassian__transitionJiraIssue",
+        "mcp__plugin-atlassian-atlassian__addCommentToJiraIssue"
+      ],
+      "disallowed_tools": [
+        "mcp__glean_default__run_tool",
+        "mcp__glean_default__find_skills",
+        "mcp__plugin-atlassian-atlassian__createJiraIssue",
+        "mcp__plugin-atlassian-atlassian__createConfluencePage"
+      ],
+      "preflight_prompt": "Read-only check: use Glean to confirm search works and use Atlassian to fetch the sandbox issue, then confirm in one sentence that both read paths work. Make no writes.",
+      "prompt_prefix": "Use Glean MCP for knowledge retrieval and Atlassian MCP for the sandbox write."
+    },
+
+    "arm2_plugin": {
+      "label": "Plugin: Atlassian-write + Glean-read + Glean plugin",
+      "requires_plugin": "present",
+      "mcp_config": "config/mcp.none.json",
+      "expected_mcp_servers": ["glean_default", "plugin-atlassian-atlassian", "plugin-glean-vnext-glean"],
+      "require_live_tool_servers": ["glean_default", "plugin-atlassian-atlassian", "plugin-glean-vnext-glean"],
+      "forbidden_mcp_servers": [],
+      "allowed_tools": [
+        "mcp__glean_default__search",
+        "mcp__glean_default__read_document",
+        "mcp__glean_default__chat",
+        "mcp__glean_default__employee_search",
+        "mcp__plugin-glean-vnext-glean__search",
+        "mcp__plugin-glean-vnext-glean__read_document",
+        "mcp__plugin-glean-vnext-glean__chat",
+        "mcp__plugin-glean-vnext-glean__employee_search",
+        "mcp__plugin-glean-vnext-glean__find_skills",
+        "mcp__plugin-atlassian-atlassian__search",
+        "mcp__plugin-atlassian-atlassian__getAccessibleAtlassianResources",
+        "mcp__plugin-atlassian-atlassian__getJiraIssue",
+        "mcp__plugin-atlassian-atlassian__searchJiraIssuesUsingJql",
+        "mcp__plugin-atlassian-atlassian__getConfluencePage",
+        "mcp__plugin-atlassian-atlassian__getTransitionsForJiraIssue",
+        "mcp__plugin-atlassian-atlassian__editJiraIssue",
+        "mcp__plugin-atlassian-atlassian__transitionJiraIssue",
+        "mcp__plugin-atlassian-atlassian__addCommentToJiraIssue"
+      ],
+      "disallowed_tools": [
+        "mcp__plugin-atlassian-atlassian__createJiraIssue",
+        "mcp__plugin-atlassian-atlassian__createConfluencePage"
+      ],
+      "preflight_prompt": "Read-only check: confirm the Glean plugin (plugin-glean-vnext-glean) is available alongside Glean read and Atlassian, then confirm in one sentence. Make no writes.",
+      "prompt_prefix": "Use the Glean plugin and Glean MCP for knowledge retrieval and Atlassian MCP for the sandbox write."
+    }
+  },
+
+  "extra_cursor_args": []
+}

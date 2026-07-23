@@ -222,6 +222,27 @@ Outputs:
 - `results/submission_manifest.json`
 - `results/eval_submission.zip`
 
+## Plugin A/B variant (Cursor)
+
+A second variant measures the effect of the **Glean Cursor plugin** on a
+**write + read** workflow, holding everything else constant:
+
+- **Arm 1 — baseline:** Atlassian-write MCP + Glean-read MCP (`glean_default`)
+- **Arm 2 — plugin:** Arm 1 **+ the Glean plugin** (`glean_run` skill + `run_tool` gateway)
+
+Live testing established that the plugin **cannot be toggled programmatically**
+for headless `cursor-agent`, so the two arms require a real uninstall/install of
+the plugin. The kit makes this defensible with a **live presence gate** that
+verifies the plugin's actual state before each arm and labels every run by
+observed plugin usage. See [docs/PLUGIN_TEST.md](docs/PLUGIN_TEST.md).
+
+```bash
+cp config/eval.config.plugin.example.json eval.config.json   # then set sandbox.jira_issue_key
+python3 scripts/plugin_ab.py detect --config eval.config.json
+python3 scripts/plugin_ab.py run    --config eval.config.json --participant-id user01
+python3 scripts/plugin_ab.py report --config eval.config.json
+```
+
 ## Field runbook
 
 For AE/AISM/AIOM/SA usage, start with [docs/FIELD_RUNBOOK.md](docs/FIELD_RUNBOOK.md).
