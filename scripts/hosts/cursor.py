@@ -112,6 +112,33 @@ def _extract_usage(obj: Any) -> Dict[str, int]:
     return usage
 
 
+def _parse_tool_call(ev: Dict[str, Any]) -> Optional[Dict[str, Optional[str]]]:
+    """Extract {name, server} from a Cursor `tool_call` event.
+
+    Cursor nests the payload under ev["tool_call"] as a single-key dict whose key
+    names the tool kind, e.g. {"mcpToolCall": {"args": {...}}} for MCP calls or
+    {"readToolCall": {...}} for built-ins. MCP args carry providerIdentifier /
+    serverIdentifier and toolName. Older/flat shapes (top-level name/tool) are
+    still handled as a fallback.
+    """
+    tc = ev.get("tool_call")
+    if not isinstance(tc, dict):
+        name = str(ev.get("name") or ev.get("tool") or "")
+        parts = name.split("__")
+        server = parts[1] if name.startswith("mcp__") and len(parts) >= 2 else None
+        return {"name": name, "server": server} if name else None
+    kind, payload = next(iter(tc.items()), (None, None))
+    if kind == "mcpToolCall" and isinstance(payload, dict):
+        args = payload.get("args") if isinstance(payload.get("args"), dict) else {}
+        server = args.get("providerIdentifier") or args.get("serverIdentifier")
+        tool = args.get("toolName")
+        name = f"mcp__{server}__{tool}" if server and tool else str(args.get("name") or "")
+        return {"name": name, "server": server}
+    # Non-MCP built-in tool (read/edit/shell/etc.): keep the call, no MCP server.
+    name = str(kind or ev.get("name") or "")
+    return {"name": name, "server": None} if name else None
+
+
 class CursorAdapter(HostAdapter):
     name = "cursor"
     caps = {
@@ -199,6 +226,7 @@ class CursorAdapter(HostAdapter):
         session_id = None
         is_error = False
         tool_calls: List[Dict[str, Any]] = []
+        seen_tool_call_ids: set = set()
         usage = {k: 0 for k in _USAGE_ALIASES}
 
         for ev in events:
@@ -207,14 +235,17 @@ class CursorAdapter(HostAdapter):
                 model = ev.get("model") or model
                 session_id = ev.get("session_id") or ev.get("sessionId") or session_id
             elif etype in ("tool_call", "tool_use"):
-                # TODO(verify): confirm Cursor's tool-call event field names + how the
-                # MCP server is identified so mcp_servers_used is populated correctly.
-                name = str(ev.get("name") or ev.get("tool") or "")
-                server = None
-                if name.startswith("mcp__"):
-                    parts = name.split("__")
-                    server = parts[1] if len(parts) >= 2 else None
-                tool_calls.append({"name": name, "server": server})
+                # Cursor emits a started + completed event per call; dedupe by call_id
+                # so one tool call is counted once.
+                call_id = ev.get("call_id") or ev.get("callId") or ev.get("id")
+                if call_id is not None and call_id in seen_tool_call_ids:
+                    continue
+                parsed = _parse_tool_call(ev)
+                if parsed is None:
+                    continue
+                if call_id is not None:
+                    seen_tool_call_ids.add(call_id)
+                tool_calls.append(parsed)
             elif etype == "result":
                 answer_text = ev.get("result") or answer_text
                 duration_ms = ev.get("duration_ms") or duration_ms
