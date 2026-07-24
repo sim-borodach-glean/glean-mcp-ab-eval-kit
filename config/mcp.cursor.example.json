@@ -2,7 +2,7 @@
   "_comment": "Cursor per-arm MCP config template. Cursor's .cursor/mcp.json server entries differ from Claude's: a remote server uses {\"url\": ...}, a local one uses {\"command\": ..., \"args\": [...]}. The Cursor adapter stages this file's mcpServers into the arm's isolated workspace. Copy to e.g. mcp/direct.cursor.json and point the arm's mcp_config at it.",
   "mcpServers": {
     "atlassian": {
-      "url": "https://mcp.atlassian.com/v1/sse"
+      "url": "https://mcp.atlassian.com/v1/mcp"
     }
   }
 }

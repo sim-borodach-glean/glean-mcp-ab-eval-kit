@@ -87,8 +87,8 @@ Example direct endpoint shape:
 {
   "mcpServers": {
     "atlassian": {
-      "type": "sse",
-      "url": "https://mcp.atlassian.com/v1/sse"
+      "type": "http",
+      "url": "https://mcp.atlassian.com/v1/mcp"
     },
     "slack": {
       "type": "http",
