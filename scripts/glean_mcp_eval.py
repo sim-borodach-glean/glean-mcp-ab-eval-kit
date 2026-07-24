@@ -1355,8 +1355,42 @@ def judge_prompt(meta: Dict[str, Any], run_a: Dict[str, Any], run_b: Dict[str, A
         f"Query: {meta.get('prompt')}\n\n"
         f"{a_tok}Answer A:\n{run_a.get('_answer', '')}\n\n"
         f"{b_tok}Answer B:\n{run_b.get('_answer', '')}\n\n"
-        'Return the required JSON object only, using "A", "B", or "tie" for the winner fields.'
+        "Return ONLY a single JSON object (no prose, no markdown code fences) with EXACTLY "
+        "these keys:\n"
+        '  "winner", "completeness_winner", "groundedness_winner", "usefulness_winner", '
+        '"efficiency_winner": each one of "A" | "B" | "tie"\n'
+        '  "completeness_a", "completeness_b", "groundedness_a", "groundedness_b": each a '
+        "number 1-5\n"
+        '  "confidence": "high" | "medium" | "low"\n'
+        '  "reasoning": string\n'
+        '  "watchouts": array of strings'
     )
+
+
+def extract_json_object(text: str) -> Optional[Dict[str, Any]]:
+    """Pull a single JSON object out of a model's free-text answer.
+
+    Structured-output hosts return clean JSON, but schema-free hosts (e.g. Cursor)
+    may wrap it in ```json fences or add a prose preamble. Try a direct parse, then
+    a fenced block, then the outermost {...} span.
+    """
+    if not text:
+        return None
+    candidates = [text.strip()]
+    fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    if fence:
+        candidates.append(fence.group(1))
+    start, end = text.find("{"), text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        candidates.append(text[start:end + 1])
+    for c in candidates:
+        try:
+            obj = json.loads(c)
+            if isinstance(obj, dict):
+                return obj
+        except Exception:
+            continue
+    return None
 
 
 def command_grade(args: argparse.Namespace) -> int:
@@ -1407,12 +1441,20 @@ def command_grade(args: argparse.Namespace) -> int:
                 host=cfg.get("judge_host") or "claude-code",
             )
             raw = read_json(Path(rec["raw_output_path"])) if rec.get("raw_output_path") and Path(rec["raw_output_path"]).exists() else {}
-            blind_grade = raw.get("structured_output")
-            if not blind_grade and isinstance(raw.get("result"), str):
-                try:
-                    blind_grade = json.loads(raw["result"])
-                except Exception:
-                    blind_grade = None
+            blind_grade = None
+            if isinstance(raw, dict):
+                blind_grade = raw.get("structured_output")
+                if not blind_grade and isinstance(raw.get("result"), str):
+                    try:
+                        blind_grade = json.loads(raw["result"])
+                    except Exception:
+                        blind_grade = None
+            # Host-agnostic fallback (e.g. Cursor, whose raw output is an event list):
+            # parse the JSON grade out of the judge's harvested answer text.
+            if not isinstance(blind_grade, dict):
+                ans_path = rec.get("answer_path")
+                if ans_path and Path(ans_path).exists():
+                    blind_grade = extract_json_object(Path(ans_path).read_text(encoding="utf-8", errors="ignore"))
             if not isinstance(blind_grade, dict):
                 failures += 1
                 blind_grade = None
