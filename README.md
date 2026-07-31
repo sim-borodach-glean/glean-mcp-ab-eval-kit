@@ -241,18 +241,22 @@ Do not make headline claims if `aggregate_summary.md` says `Run validity: FAIL` 
 
 ## The easiest path for a nontechnical end user
 
-The recommended experience is to open the repo in Claude Code and ask Claude Code to act as the setup guide. The user completes authentication and approvals; Claude Code runs the local setup, validation, smoke test, and evaluation commands. It uses the shipped 16-prompt reference suite by default, never requests secrets in chat, and asks before sharing artifacts.
+The recommended experience is to open the repo in Claude Code and ask Claude Code to act as the setup guide. The user selects the direct MCP profile and prompt pack, completes authentication and approvals, and chooses what to share. Claude Code runs the local setup, validation, smoke test, and evaluation commands, never requests secrets in chat, and preserves the comprehensive local artifacts.
 
 Suggested first message:
 
 ```text
 I want to run the Glean MCP A/B evaluation in this folder.
 
-Read README.md and docs/END_USER_QUICKSTART.md first. Act as my setup guide and run the local setup commands on my behalf. Use the current-reference direct profile: Slack + Atlassian + Notion + GitHub, and keep the shipped 16-prompt reference suite.
+Read README.md and docs/END_USER_QUICKSTART.md first. Act as my setup guide and run the local setup commands on my behalf.
 
-I will complete browser-based OAuth or other required authentication steps, provide approved Glean MCP connection details when needed, and approve the smoke test and full evaluation. Stop and explain any failure instead of asking me to run commands manually. Do not ask me to paste tokens, OAuth secrets, refresh tokens, or PATs into this chat.
+Before doing any setup, ask me which direct MCP profile I want: current-reference (Slack + Atlassian + Notion + GitHub), minimal (Slack + Atlassian), or a custom profile if available. Also ask which prompt pack I want: the 16-prompt reference suite, the smaller example suite, or a custom TSV path.
 
-Before the full evaluation, verify both arms with doctor and live preflight, then run the three-prompt smoke test. Only run the full 16-prompt evaluation after I approve the smoke-test result. Keep the evaluation strictly read-only, do not add ambient MCPs to either arm, keep all comprehensive artifacts local, and ask before sharing any result files or customer-facing excerpts.
+Show me the selected direct MCP profile and prompt pack, explain what will run, and wait for my explicit confirmation. Do not run setup, authentication checks, preflight, smoke tests, or evaluation prompts before I confirm those choices.
+
+After confirmation, I will complete browser-based OAuth or other required authentication steps, provide approved Glean MCP connection details when needed, and approve the smoke test and full evaluation. Stop and explain any failure instead of asking me to run commands manually. Do not ask me to paste tokens, OAuth secrets, refresh tokens, or PATs into this chat.
+
+Before the full evaluation, verify both arms with doctor and live preflight, then run the three-prompt smoke test. Only run the selected prompt pack after I approve the smoke-test result. Keep the evaluation strictly read-only, do not add ambient MCPs to either arm, keep all comprehensive artifacts local, and ask before sharing any result files or customer-facing excerpts.
 ```
 
 This is easier for business power users and data analysts than memorizing the CLI. It still cannot eliminate vendor OAuth approval or credentials that only an administrator can provide.
