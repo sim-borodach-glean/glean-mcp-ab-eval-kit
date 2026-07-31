@@ -11,11 +11,13 @@ I want to run the Glean MCP A/B evaluation in this folder.
 
 Read README.md and docs/END_USER_QUICKSTART.md first. Act as a setup guide:
 1. Check Python, Claude Code, and Claude Code login.
-2. Ask me which direct MCPs I want to compare.
+2. Ask me which direct MCPs I want to compare; default to the current-reference Slack + Atlassian + Notion + GitHub profile unless I choose another profile.
 3. Configure and authenticate one MCP at a time, without asking me to paste tokens or client secrets into chat.
-4. Run setup-direct, doctor, and live preflight for both arms.
+4. Run setup, setup-direct, doctor, and live preflight for both arms. Keep the shipped 16-prompt reference suite unless I explicitly choose a different prompt file.
 5. Stop and explain any failure; do not run the evaluation until both preflights pass.
-6. Once I approve, run both arms for participant ID mi01, then grade and report.
+6. Run the three-prompt smoke test and show me the result.
+7. Once I approve, run both arms for participant ID mi01, then grade, report, and package.
+8. Keep all comprehensive local artifacts. Ask before sharing any result files or customer-facing excerpts.
 
 Keep the evaluation read-only and do not add ambient MCPs to either strict arm.
 ```
@@ -25,10 +27,11 @@ Claude Code should explain each command before running it. Browser-based OAuth i
 ## What the setup agent should do
 
 1. Confirm Claude Code login and Python.
-2. Read the expected direct MCP names from `eval.config.json`.
+2. Run `setup --profile current-reference` to create the local config and copy the shipped 16-prompt reference suite.
 3. Check `claude mcp list`.
 4. Add/authenticate missing MCPs one at a time using the vendor instructions in [END_USER_MCP_SETUP.md](END_USER_MCP_SETUP.md).
-5. Run:
+5. Read the expected direct MCP names from `eval.config.json`.
+6. Run:
 
 ```bash
 python3 scripts/glean_mcp_eval.py setup-direct --config eval.config.json --dry-run
@@ -38,8 +41,16 @@ python3 scripts/glean_mcp_eval.py preflight --config eval.config.json --arm glea
 python3 scripts/glean_mcp_eval.py preflight --config eval.config.json --arm direct --live
 ```
 
-6. Stop if either preflight fails.
-7. With approval, run the full evaluation:
+7. Stop if either preflight fails.
+8. With approval, run the smoke test:
+
+```bash
+python3 scripts/glean_mcp_eval.py smoke-test \
+  --config eval.config.json \
+  --participant-id smoke01
+```
+
+9. With approval after the smoke test, run the full evaluation:
 
 ```bash
 python3 scripts/glean_mcp_eval.py run-all \
@@ -47,7 +58,7 @@ python3 scripts/glean_mcp_eval.py run-all \
   --participant-id mi01
 ```
 
-This runs both arms, grades the paired answers, generates the report, and packages the results. Existing successful prompts are resumable; use `--rerun-existing` for a deliberate fresh run.
+This runs both arms, grades the paired answers, generates the report, and packages the results. Existing successful prompts are resumable; use `--rerun-existing` for a deliberate fresh run. The run keeps comprehensive local artifacts; share only the report or selected excerpts that the facilitator approves.
 
 ## Current reference direct set
 

@@ -7,7 +7,7 @@ A small, repeatable harness for comparing:
 
 The kit runs the same prompts with the same model, captures usage from Claude Code transcripts, checks MCP isolation, and produces paired quality/cost/latency results.
 
-> **Current reference run:** Glean MCP vs Slack + Atlassian + Notion + GitHub direct MCPs. The reference run used 16 prompts, passed all validity gates, and produced 16 valid paired rows. Customer-specific configs, prompts, credentials, and results are local-only and are not part of the shareable kit.
+> **Current reference suite:** Glean MCP vs Slack + Atlassian + Notion + GitHub direct MCPs, using the 16-prompt pack in [`prompts/golden_prompts.reference.tsv`](prompts/golden_prompts.reference.tsv). The suite is included as a shareable reference; credentials, local MCP configs, and evaluation results remain local-only.
 
 ## Five-minute mental model
 
@@ -52,10 +52,10 @@ At the end:
 ```text
 scripts/glean_mcp_eval.py       Main CLI: setup, doctor, preflight, run, grade, report, package
 config/                          Shareable example configs
-prompts/                         Shareable example prompt TSV
+prompts/                         Shareable example and reference prompt TSVs
 mcp/                             Local strict MCP files; gitignored
 config/server-profiles.example.json  Named direct-server profiles
-results/                         Local answers, grades, reports; customer data; gitignored
+results/                         Comprehensive local answers, grades, reports; customer data; gitignored
 docs/END_USER_QUICKSTART.md     One-page guided setup
 docs/END_USER_MCP_SETUP.md      Vendor authentication details
 docs/METHODOLOGY.md              Evaluation design and validity rules
@@ -111,7 +111,7 @@ The equivalent manual setup is:
 
 ```bash
 cp config/eval.config.strict.example.json eval.config.json
-cp prompts/golden_prompts.example.tsv golden_prompts.tsv
+cp prompts/golden_prompts.reference.tsv golden_prompts.tsv
 mkdir -p mcp
 cp config/mcp.glean.example.json mcp/glean.mcp.json
 cp config/mcp.direct.example.json mcp/direct.mcp.json
@@ -125,7 +125,7 @@ Edit `eval.config.json` to set:
 - expected/forbidden servers for each arm
 - read-only allowed/disallowed tools
 
-The local files under `mcp/`, `eval.config.json`, `golden_prompts.tsv`, and `results/` are ignored by Git.
+The local files under `mcp/`, `eval.config.json`, `golden_prompts.tsv`, and `results/` are ignored by Git. The reference suite is the default for `setup`; teams can replace `golden_prompts.tsv` with their own prompt pack or use the smaller `prompts/golden_prompts.example.tsv` for a lightweight smoke run. Prompt TSVs may carry additional columns for optional metadata or future grading criteria, but the standard workflow only requires `ID`, `Dept`, and `Prompt`.
 
 ### 3. Authenticate MCPs
 
@@ -228,17 +228,20 @@ For a crossover pilot, vary the order across participants. The current reference
 
 ### 7. Inspect outputs
 
-`run-all` creates the report and package automatically. The important outputs are:
+`run-all` creates a comprehensive local record, report, and optional checksum package automatically. The important outputs include:
 
 - `results/aggregate_summary.md`
 - `results/aggregate_rows.csv`
-- `results/eval_submission.zip`
+- per-prompt answer, transcript, command, metadata, and `run.json` files
+- `results/eval_submission.zip` when a packaged handoff is useful
+
+Keep the complete results directory for auditability, but let the facilitator decide what to share with a customer. A customer-facing readout will usually use the aggregate summary, selected answer excerpts, and selected evidence—not raw transcripts or every internal artifact.
 
 Do not make headline claims if `aggregate_summary.md` says `Run validity: FAIL` or quality grading is `NOT RUN`.
 
 ## The easiest path for a nontechnical end user
 
-The near-term recommended experience is to open the repo in Claude Code and ask Claude Code to act as the setup guide. It should read the README and vendor guide, ask one setup question at a time, never request secrets in chat, and run the commands only after explaining them.
+The recommended experience is to open the repo in Claude Code and ask Claude Code to act as the setup guide. It should use the shipped 16-prompt reference suite by default, ask one setup question at a time, never request secrets in chat, and run commands only after explaining them.
 
 Suggested first message:
 
@@ -247,11 +250,13 @@ I want to run the Glean MCP A/B evaluation in this folder.
 
 Read README.md and docs/END_USER_QUICKSTART.md first. Act as a setup guide:
 1. Check Python, Claude Code, and Claude Code login.
-2. Ask me which direct MCPs I want to compare.
+2. Ask me which direct MCPs I want to compare; default to the current-reference Slack + Atlassian + Notion + GitHub profile unless I choose another profile.
 3. Configure and authenticate one MCP at a time, without asking me to paste tokens or client secrets into chat.
-4. Run setup, setup-direct, doctor, and live preflight for both arms.
+4. Run setup, setup-direct, doctor, and live preflight for both arms. Keep the shipped 16-prompt reference suite unless I explicitly choose a different prompt file.
 5. Stop and explain any failure; do not run the evaluation until both preflights pass.
-6. Once I approve, run both arms for participant ID mi01, then grade and report.
+6. Run the three-prompt smoke test and show me the result.
+7. Once I approve, run both arms for participant ID mi01, then grade, report, and package.
+8. Keep all comprehensive local artifacts. Ask before sharing any result files or customer-facing excerpts.
 
 Keep the evaluation read-only and do not add ambient MCPs to either strict arm.
 ```

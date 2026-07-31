@@ -230,7 +230,9 @@ def command_setup(args: argparse.Namespace) -> int:
     root = config_path.parent
     examples = {
         config_path: root / "config" / "eval.config.strict.example.json",
-        root / "golden_prompts.tsv": root / "prompts" / "golden_prompts.example.tsv",
+        # The shipped reference suite is the default operator experience. The small
+        # example pack remains available for teams that want a lightweight smoke run.
+        root / "golden_prompts.tsv": root / "prompts" / "golden_prompts.reference.tsv",
         root / "mcp" / "glean.mcp.json": root / "config" / "mcp.glean.example.json",
         root / "mcp" / "direct.mcp.json": root / "config" / "mcp.direct.example.json",
     }
