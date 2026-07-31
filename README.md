@@ -1,302 +1,321 @@
-# Glean MCP A/B Eval Kit
+# Glean MCP A/B Evaluation Kit
 
-Open-sourceable kit for running a defensible A/B evaluation of **Glean MCP** vs **vendor-direct MCP connectors** in agent hosts like **Claude Code** and **Cursor**.
+A small, repeatable harness for comparing:
 
-The kit is modeled after an enterprise crossover pilot pattern:
+- **Glean MCP**: Claude Code connected to Glean MCP.
+- **Direct MCPs**: Claude Code connected directly to the customer’s selected vendor MCPs.
 
-- **Arm A / Glean**: Claude Code with Glean MCP enabled.
-- **Arm B / Direct**: Claude Code with the equivalent vendor MCPs enabled directly.
-- Same model, same prompt set, same participant machine.
-- Each prompt runs in a fresh Claude Code headless session.
-- Usage is harvested from Claude Code's local JSONL transcripts, not estimated.
-- Rows are auto-flagged for setup failures, model mismatch, and zero retrieval/tool calls.
-- Results can be graded, aggregated, and packaged with checksums for central analysis.
+The kit runs the same prompts with the same model, captures usage from Claude Code transcripts, checks MCP isolation, and produces paired quality/cost/latency results.
 
-> This repository does **not** ship customer-specific prompts or connector credentials. Customers provide their own MCP configs and golden prompt TSV.
+> **Current reference run:** Glean MCP vs Slack + Atlassian + Notion + GitHub direct MCPs. The reference run used 16 prompts, passed all validity gates, and produced 16 valid paired rows. Customer-specific configs, prompts, credentials, and results are local-only and are not part of the shareable kit.
 
-## How it works
+## Five-minute mental model
 
 ```mermaid
-flowchart TD
-    A["Download the kit<br/>(clone or unzip)"] --> B["Install & configure<br/>plugin / skill / CLI"]
-    B --> C["Copy per-arm MCP configs<br/>mcp/glean.mcp.json · mcp/direct.mcp.json"]
-    C --> D["Crossover schedule<br/>half glean-first, half direct-first"]
-
-    subgraph ArmA["Arm A · Glean MCP"]
-        direction TB
-        A1["Load only Glean<br/>--mcp-config --strict-mcp-config"] --> A2{{"Preflight gate<br/>expected present · forbidden absent<br/>model match · retrieval occurred"}}
-        A2 --> A3["Run each golden prompt<br/>fresh claude -p · read-only tools"]
-        A3 --> A4["Harvest JSONL transcript<br/>tokens · cost · latency · tool calls"]
-    end
-
-    subgraph ArmB["Arm B · vendor-direct MCP"]
-        direction TB
-        B1["Load only vendor MCP<br/>--mcp-config --strict-mcp-config"] --> B2{{"Preflight gate<br/>expected present · forbidden absent<br/>model match · retrieval occurred"}}
-        B2 --> B3["Run each golden prompt<br/>same set · same model · read-only"]
-        B3 --> B4["Harvest JSONL transcript<br/>tokens · cost · latency · tool calls"]
-    end
-
-    D --> A1
-    D --> B1
-    A4 --> J["Blind judge<br/>answers shown as A / B, de-blinded after"]
-    B4 --> J
-    J --> E["Efficiency<br/>tokens · cost · latency"]
-    J --> Q["Quality<br/>completeness · groundedness · winner"]
-    E --> R["Persist per-prompt rows<br/>results / participant / arm / prompt"]
-    Q --> R
-    R --> Z["Package eval_submission.zip<br/>(checksummed)"]
-    Z --> AGG["Admin aggregates<br/>import → grade → report"]
-    AGG --> DEL["Deliver readout<br/>aggregate_summary.md · CSV · bootstrap CIs"]
-
-    classDef gate stroke:#dc4c4c,stroke-width:2px,stroke-dasharray:5 4;
-    classDef armA stroke:#3559e6,stroke-width:2px;
-    classDef armB stroke:#b5791f,stroke-width:2px;
-    class A1,A3,A4 armA;
-    class B1,B3,B4 armB;
-    class A2,B2 gate;
+flowchart LR
+    A[Prompts + eval config] --> B[Authenticate MCPs]
+    B --> C[Generate strict arm configs]
+    C --> D[Live preflight]
+    D --> E[Run Glean arm]
+    D --> F[Run direct arm]
+    E --> G[Grade paired answers]
+    F --> G
+    G --> H[Report cost, tokens, latency, quality]
 ```
 
-A printable, standalone version of this diagram is at [`docs/glean_mcp_ab_eval_flow.html`](docs/glean_mcp_ab_eval_flow.html) — open it in a browser (light/dark aware).
+Each prompt runs in a fresh Claude Code session. The two arms are isolated with separate MCP JSON files, so a direct run cannot accidentally use Glean and a Glean run cannot accidentally use vendor MCPs.
 
-## Hosts
+## What the kit produces
 
-The eval runs on multiple agent hosts behind one host-agnostic core — same prompts, blind judge, metrics, and aggregation, so results are comparable across hosts. Set `"host"` in `eval.config.json` (or pass `--host`), then follow that host's guide.
+For every prompt and arm:
 
-| Capability | Claude Code | Cursor |
-|---|---|---|
-| Headless per-prompt run | ✅ `claude -p` | ✅ `cursor-agent -p` |
-| Per-arm MCP isolation | ✅ `--strict-mcp-config` | ✅ per-arm `--workspace` |
-| Read-only tool gating | ✅ allow/deny flags | ✅ `.cursor/cli.json` |
-| Per-run token usage | ✅ from transcript | ⚠️ verify on CLI version |
-| Per-run $ cost | ✅ reported | ❌ list-price-normalized only |
-| Structured judge output | ✅ `--json-schema` | ❌ → judge runs on `judge_host` |
+- final answer text
+- MCP servers and tools used
+- input/output/cache/total tokens
+- reported cost and latency
+- model and retrieval validity signals
 
-- **Claude Code** (default, reference host) — [docs/hosts/claude-code.md](docs/hosts/claude-code.md)
-- **Cursor** (skeleton — see the guide for open `TODO(verify)` items) — [docs/hosts/cursor.md](docs/hosts/cursor.md)
+For each paired prompt:
 
-Adapters live in `scripts/hosts/` behind the `HostAdapter` contract in `scripts/hosts/base.py`; adding a host means adding one module there. The quick start below uses Claude Code.
+- blind A/B judge scores for completeness, groundedness, and usefulness
+- winner and judge reasoning
+- watchouts and confidence
 
-## Repository layout
+At the end:
+
+- `results/aggregate_summary.md`
+- `results/aggregate_rows.csv`
+- optional `results/eval_submission.zip`
+
+## Repository map
 
 ```text
-.claude-plugin/plugin.json       Claude Code plugin manifest
-commands/                       Plugin slash-command prompts
-.claude/skills/glean-mcp-eval/  Project skill alternative to plugin commands
-scripts/glean_mcp_eval.py       Host-agnostic CLI, orchestration, Claude Code adapter
-scripts/hosts/                  Host adapter contract (base.py) + Cursor adapter (cursor.py)
-bin/glean-mcp-eval              Shell wrapper for zip installs
-config/eval.config.example.json Default strict-mode customer config
-config/eval.config.strict.example.json  Strict per-arm MCP config example
-config/eval.config.ambient.example.json Ambient Claude Code MCP config example
-config/mcp.glean.example.json   Per-arm MCP config template (Glean arm)
-config/mcp.direct.example.json  Per-arm MCP config template (vendor-direct arm)
-config/mcp.none.json            Empty MCP config used to isolate the judge
-config/mcp.cursor.example.json  Per-arm MCP config template (Cursor server shape)
-prompts/golden_prompts.example.tsv
-                              Prompt TSV schema + safe sample prompts
-docs/METHODOLOGY.md             Evaluation design and caveats
-docs/hosts/                     Per-host setup guides (claude-code.md, cursor.md)
-docs/CONNECTOR_HEALTH_CHECKLIST.md
-                              Daily connector health process
-docs/FIELD_RUNBOOK.md           Minimal field/customer runbook
-docs/READOUT_TEMPLATE.md        Stakeholder readout template
-docs/OPEN_SOURCE_NOTES.md       Sanitization checklist before publishing
-docs/glean_mcp_ab_eval_flow.html
-                              Standalone printable process-flow diagram
+scripts/glean_mcp_eval.py       Main CLI: setup, doctor, preflight, run, grade, report, package
+config/                          Shareable example configs
+prompts/                         Shareable example prompt TSV
+mcp/                             Local strict MCP files; gitignored
+config/server-profiles.example.json  Named direct-server profiles
+results/                         Local answers, grades, reports; customer data; gitignored
+docs/END_USER_QUICKSTART.md     One-page guided setup
+docs/END_USER_MCP_SETUP.md      Vendor authentication details
+docs/METHODOLOGY.md              Evaluation design and validity rules
+docs/FIELD_RUNBOOK.md            Facilitator/customer operating guide
+commands/                       Claude Code plugin slash commands
+.claude/skills/                  Project-local Claude Code skill
 ```
 
-## Quick start
+## Current supported workflow: Claude Code
 
-### 1. Install / enable the Claude Code plugin
+Claude Code is the reference host because it supports:
 
-From the repo root in Claude Code:
+- headless per-prompt sessions with `claude -p`
+- strict per-arm MCP isolation
+- read-only allowed/disallowed tool lists
+- transcript-derived usage and cost
+- structured judge output
 
-```text
-/plugin install .
-/reload-plugins
+Cursor support exists as a secondary adapter, but the examples and customer quickstart below target Claude Code.
+
+## Quickstart for an operator
+
+### 1. Prepare a local working copy
+
+```bash
+cd "/path/to/glean-mcp-ab-eval-kit"
+
+python3 --version
+claude --version
 ```
 
-If distributing as a zip, unzip it and install from that local path.
+Use Python 3.11+ and a recent Claude Code CLI. Log Claude Code in once:
 
-### 2. Choose MCP setup mode, then copy config
+```bash
+claude
+```
 
-Choose **one** MCP setup mode:
+Then run `/login` inside Claude Code.
 
-| Mode | Source of MCP truth | Manual add/remove between arms? | Best for |
-|---|---|---:|---|
-| `strict` | `mcp/glean.mcp.json` and `mcp/direct.mcp.json` | No | Repeatable benchmark runs |
-| `ambient` | whatever appears in `claude mcp list` | Yes | Quick local debugging |
+### 2. Create local config files
 
-Strict mode is the default/recommended path:
+For a new evaluation, use the guided setup command:
+
+```bash
+python3 scripts/glean_mcp_eval.py setup \
+  --config eval.config.json \
+  --profile current-reference
+```
+
+This creates local config, prompt, and MCP files when they do not exist and applies the selected direct-server profile. It does not overwrite existing local files unless you pass `--force`.
+
+The equivalent manual setup is:
 
 ```bash
 cp config/eval.config.strict.example.json eval.config.json
 cp prompts/golden_prompts.example.tsv golden_prompts.tsv
 mkdir -p mcp
-cp config/mcp.glean.example.json  mcp/glean.mcp.json
+cp config/mcp.glean.example.json mcp/glean.mcp.json
 cp config/mcp.direct.example.json mcp/direct.mcp.json
 ```
 
-For ambient mode instead:
+Edit `eval.config.json` to set:
 
-```bash
-cp config/eval.config.ambient.example.json eval.config.json
-cp prompts/golden_prompts.example.tsv golden_prompts.tsv
+- prompt file
+- model and judge model
+- participant ID at run time
+- expected/forbidden servers for each arm
+- read-only allowed/disallowed tools
+
+The local files under `mcp/`, `eval.config.json`, `golden_prompts.tsv`, and `results/` are ignored by Git.
+
+### 3. Authenticate MCPs
+
+Authenticate the Glean MCP and the customer-selected direct MCPs in Claude Code. Use the vendor guide for exact URLs and OAuth/API-key details:
+
+[docs/END_USER_MCP_SETUP.md](docs/END_USER_MCP_SETUP.md)
+
+The current reference direct set is:
+
+```text
+slack
+atlassian
+notion
+github
 ```
 
-Edit `eval.config.json`:
-
-- Set `mcp_mode` to `strict` or `ambient`.
-- Set `prompts_file` and the `model` to hold constant.
-- For each arm set `expected_mcp_servers`, `forbidden_mcp_servers`, and read-only
-  `allowed_tools` / `disallowed_tools`.
-- Optionally set `preflight_prompt`, `pricing_per_million`, `judge_hide_tokens`.
-
-In strict mode, fill in `mcp/glean.mcp.json` and `mcp/direct.mcp.json`. These live
-under `mcp/`, which is gitignored — they never ship. The kit passes
-`--mcp-config <file> --strict-mcp-config`, so each arm executes with exactly its own
-servers regardless of what is installed globally. You do **not** manually enable/disable
-MCPs between arms in strict mode.
-
-In ambient mode, remove/disable the wrong-arm MCPs before each arm and confirm with
-`claude mcp list`; the kit validates that current Claude Code MCP state.
-
-Keep `allowed_tools`/`disallowed_tools` read-only: allow only `search`/`read`/`get*`
-tools and deny writes and any arbitrary-dispatch tool (e.g. Glean's `run_tool`), so a
-read-only eval can never mutate live systems. Built-in local tools such as `Bash`,
-`Read`, `Write`, `WebSearch`, and `WebFetch` are blocked by default with
-`default_disallow_builtin_tools: true`.
-
-### 3. Sanity check, then run preflight
-
-First confirm the environment without spending tokens:
+Check status:
 
 ```bash
-python3 scripts/glean_mcp_eval.py doctor --config eval.config.json
+claude mcp list
 ```
 
-`doctor` reports whether `claude` is on PATH, **which CLI flags your Claude Code
-version supports** (catches drift), the MCP servers it can see, and the prompt count.
+### 4. Materialize the strict direct config
 
-Then validate each arm (add `--dry-run` to any command to print the exact `claude`
-invocation without executing — useful for a customer security review):
+Do not copy every ambient MCP into the eval. This command reads Claude Code’s local MCP definitions and selects only the names in `arms.direct.expected_mcp_servers`:
 
 ```bash
-python3 scripts/glean_mcp_eval.py preflight --config eval.config.json --arm glean --live
-python3 scripts/glean_mcp_eval.py preflight --config eval.config.json --arm direct --live
+python3 scripts/glean_mcp_eval.py setup-direct \
+  --config eval.config.json \
+  --dry-run
+
+python3 scripts/glean_mcp_eval.py setup-direct \
+  --config eval.config.json
 ```
 
-For zip installs you can use the wrapper instead:
+It writes `mcp/direct.mcp.json` and fails closed if an expected server is missing. It excludes unrelated servers such as `glean_default` and failed/stale entries.
+
+### 5. Run the gates
+
+Start with a cheap three-prompt smoke test:
 
 ```bash
-bin/glean-mcp-eval preflight --config eval.config.json --arm glean --live
+python3 scripts/glean_mcp_eval.py smoke-test \
+  --config eval.config.json \
+  --participant-id smoke01
 ```
 
-Preflight checks static MCP config and, with `--live`, runs a harmless Claude Code probe that must call every expected MCP server for that arm. `run` refuses to start unless latest live preflight passed; override only for debugging with `--force`.
-
-### 4. Run an arm
-
-Each prompt is run in an isolated `claude -p` session and stored under `results/<participant>/<arm>/<prompt_id>/`.
+For the full gates:
 
 ```bash
-python3 scripts/glean_mcp_eval.py run \
+python3 scripts/glean_mcp_eval.py doctor \
+  --config eval.config.json
+
+python3 scripts/glean_mcp_eval.py preflight \
   --config eval.config.json \
   --arm glean \
-  --participant-id user01
+  --live
 
+python3 scripts/glean_mcp_eval.py preflight \
+  --config eval.config.json \
+  --arm direct \
+  --live
+```
+
+`run` refuses to start unless the latest live preflight passed. Preflight verifies that expected MCPs are available, forbidden MCPs are absent, and the probe actually retrieves from the required servers.
+
+### 6. Run, grade, report, and package
+
+The one-command path is:
+
+```bash
+python3 scripts/glean_mcp_eval.py run-all \
+  --config eval.config.json \
+  --participant-id mi01
+```
+
+`run-all` runs both arms, grades the paired answers, generates the report, and creates the checksum package. Existing successful prompt rows are skipped on later runs; use `--rerun-existing` when you intentionally want fresh answers.
+
+The individual commands remain available for facilitator control:
+
+```bash
+python3 scripts/glean_mcp_eval.py run --config eval.config.json --arm glean --participant-id mi01
+python3 scripts/glean_mcp_eval.py run --config eval.config.json --arm direct --participant-id mi01
+python3 scripts/glean_mcp_eval.py grade --config eval.config.json --participant-id mi01
+python3 scripts/glean_mcp_eval.py report --config eval.config.json
+python3 scripts/glean_mcp_eval.py package --config eval.config.json
+```
+
+Run a subset for debugging:
+
+```bash
 python3 scripts/glean_mcp_eval.py run \
   --config eval.config.json \
   --arm direct \
-  --participant-id user01
+  --participant-id debug01 \
+  --prompt-ids ENG_001,CO_001
 ```
 
-Use a crossover schedule: half the testers run `glean → direct`, half run `direct → glean`.
+For a crossover pilot, vary the order across participants. The current reference run used Glean first and direct second; order is not encoded in the result validity logic.
 
-### 5. Grade, report, and package
+### 7. Inspect outputs
 
-```bash
-python3 scripts/glean_mcp_eval.py grade --config eval.config.json --participant-id user01
-python3 scripts/glean_mcp_eval.py report --config eval.config.json
-python3 scripts/glean_mcp_eval.py package --config eval.config.json
-```
+`run-all` creates the report and package automatically. The important outputs are:
 
-For central analysis, participants send `results/eval_submission.zip`. The analysis owner imports each zip, then runs aggregate grading/reporting:
-
-```bash
-python3 scripts/glean_mcp_eval.py import --config eval.config.json /path/to/user01/eval_submission.zip
-python3 scripts/glean_mcp_eval.py import --config eval.config.json /path/to/user02/eval_submission.zip
-python3 scripts/glean_mcp_eval.py grade --config eval.config.json
-python3 scripts/glean_mcp_eval.py report --config eval.config.json
-python3 scripts/glean_mcp_eval.py package --config eval.config.json
-```
-
-Outputs:
-
-- `results/aggregate_summary.md` — includes a run-validity banner, MCP usage by row, token/cost/latency rollups, and quality status
-- `results/aggregate_rows.csv` — per-prompt raw rows for analysis
-- `results/submission_manifest.json`
+- `results/aggregate_summary.md`
+- `results/aggregate_rows.csv`
 - `results/eval_submission.zip`
 
-Do not use headline metrics if the summary says `Run validity: FAIL` or if quality grading is marked `NOT RUN` for a quality-sensitive readout.
+Do not make headline claims if `aggregate_summary.md` says `Run validity: FAIL` or quality grading is `NOT RUN`.
 
-## Field runbook
+## The easiest path for a nontechnical end user
 
-For AE/AISM/AIOM/SA usage, start with [docs/FIELD_RUNBOOK.md](docs/FIELD_RUNBOOK.md).
+The near-term recommended experience is to open the repo in Claude Code and ask Claude Code to act as the setup guide. It should read the README and vendor guide, ask one setup question at a time, never request secrets in chat, and run the commands only after explaining them.
 
-## Plugin commands
-
-After installing the plugin, use:
+Suggested first message:
 
 ```text
+I want to run the Glean MCP A/B evaluation in this folder.
+
+Read README.md and docs/END_USER_QUICKSTART.md first. Act as a setup guide:
+1. Check Python, Claude Code, and Claude Code login.
+2. Ask me which direct MCPs I want to compare.
+3. Configure and authenticate one MCP at a time, without asking me to paste tokens or client secrets into chat.
+4. Run setup, setup-direct, doctor, and live preflight for both arms.
+5. Stop and explain any failure; do not run the evaluation until both preflights pass.
+6. Once I approve, run both arms for participant ID mi01, then grade and report.
+
+Keep the evaluation read-only and do not add ambient MCPs to either strict arm.
+```
+
+This is easier for business power users and data analysts than memorizing the CLI. It still cannot eliminate vendor OAuth approval or credentials that only an administrator can provide.
+
+## Make it frictionless: recommended product path
+
+There are four practical levels of simplification:
+
+| Audience | Recommended experience | Why |
+|---|---|---|
+| Technical evaluator | Current CLI workflow | Maximum control and auditability |
+| Business power user / analyst | Open repo in Claude Code and use the guided setup prompt | Claude explains each step and handles the sequencing |
+| Executive / customer sponsor | Facilitator runs the setup and evaluation, then shares the workbook/readout | Executives should not debug OAuth or terminal state |
+
+### Included in this version
+
+1. **Guided setup:** `setup` creates local files and applies a named direct-server profile.
+2. **One-command execution:** `run-all` runs both arms, grades, reports, and packages.
+3. **Resumability:** successful prompt rows are skipped unless `--rerun-existing` is supplied.
+4. **Cheap validation:** `smoke-test` runs a three-prompt read-only check before the full evaluation.
+5. **Server profiles:** `config/server-profiles.example.json` provides named direct-server sets.
+6. **Facilitator-first operation:** [END_USER_QUICKSTART.md](docs/END_USER_QUICKSTART.md) separates operator setup from the executive/customer review experience.
+7. **Keep secrets out of chat and Git.** Use vendor-native browser OAuth where possible, prompt for API keys in the terminal, and write only ignored local config.
+8. **Make customer operation facilitator-first.** For external pilots, a trained facilitator should own MCP authentication and give the participant only the prompt/run experience.
+
+### What we should not rely on
+
+- Claude Desktop Connectors as an import source: the newer Connector state is not exposed to `claude mcp add-from-claude-desktop`.
+- Reverse-engineering Claude Desktop keychains or caches: it is brittle and unsafe.
+- Ambient MCP mode for benchmark runs: unrelated servers can leak into an arm and invalidate the comparison.
+- Asking users to paste OAuth secrets or PATs into an LLM conversation.
+
+## Evaluation design and safety
+
+- Same prompt set and model across arms.
+- Fresh Claude Code session per prompt.
+- Strict per-arm MCP config.
+- Read-only tool allowlist; mutation and arbitrary-dispatch tools are denied.
+- Static and live preflight before running.
+- Transcript-derived usage rather than estimated usage.
+- Blind paired judge with A/B labels before deblinding.
+
+The kit does not ship customer prompts, MCP credentials, OAuth secrets, or customer results.
+
+## Plugin and skill shortcuts
+
+After installing the local plugin:
+
+```text
+/plugin install .
+/reload-plugins
 /glean-mcp-eval:preflight
 /glean-mcp-eval:run-arm
 /glean-mcp-eval:grade-report-package
 ```
 
-The slash commands guide Claude to invoke the local CLI with the right checks and prompts.
-
-## Skill alternative
-
-This repo also includes a project skill at `.claude/skills/glean-mcp-eval/SKILL.md`. In Claude Code, invoke it with:
+The project-local skill can also be invoked with:
 
 ```text
 /glean-mcp-eval
 ```
 
-Use the skill when you want a lightweight project-local workflow. Use the plugin when you want a versioned installable bundle with namespaced commands.
-
-## What is measured
-
-Per prompt / arm:
-
-- input tokens
-- output tokens
-- cache creation/write tokens
-- cache read tokens
-- total tokens (plus a marginal input+output vs fixed cache-creation split)
-- cost reported by Claude Code, and a configured list-price-equivalent cost
-- wall-clock latency
-- model(s) observed in transcript
-- MCP tool calls by server
-- retrieval-attempted flag
-- final answer text
-- optional judge scores: completeness, groundedness, usefulness, winner
-
-## Validity gates
-
-Rows are flagged or excluded when:
-
-- expected MCP servers are missing
-- forbidden MCP servers are configured in the wrong arm
-- live preflight fails
-- observed model differs across arms
-- no MCP retrieval/tool call was observed
-- `claude -p` returned an error
-
-## Security / privacy
-
-This kit records final answers and local transcript-derived metadata. Do not publish customer results. Before open sourcing this repo, verify that only generic sample prompts/configs are included.
-
 ## License
 
-See [`LICENSE`](LICENSE).
+See [LICENSE](LICENSE).

@@ -1,0 +1,14 @@
+{
+  "profiles": {
+    "current-reference": {
+      "label": "Slack + Atlassian + Notion + GitHub (direct)",
+      "direct_servers": ["slack", "atlassian", "notion", "github"],
+      "preflight_prompt": "Use each of the four direct MCP servers—Slack, Atlassian, Notion, and GitHub—for one harmless read-only lookup or search. Return one sentence confirming which servers retrieved data."
+    },
+    "minimal": {
+      "label": "Atlassian + Slack (direct)",
+      "direct_servers": ["atlassian", "slack"],
+      "preflight_prompt": "Use Atlassian MCP for one harmless read-only lookup, then Slack MCP for one harmless read-only search. Return one sentence confirming both retrievals worked."
+    }
+  }
+}
