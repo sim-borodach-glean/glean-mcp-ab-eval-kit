@@ -8,6 +8,7 @@ vendor MCPs in Claude Code.
 from __future__ import annotations
 
 import argparse
+import copy
 import csv
 import datetime as dt
 import hashlib
@@ -114,8 +115,155 @@ def load_config(path: str) -> Tuple[Path, Dict[str, Any]]:
     return p, cfg
 
 
+def sensitive_mcp_paths(value: Any, path: str = "") -> List[str]:
+    """Return paths that look like they may contain credentials, never values."""
+    found: List[str] = []
+    if isinstance(value, dict):
+        for key, child in value.items():
+            child_path = f"{path}.{key}" if path else str(key)
+            key_lower = str(key).lower()
+            if any(marker in key_lower for marker in ("authorization", "token", "secret", "password", "api_key", "apikey")):
+                if child not in (None, "", [], {}):
+                    found.append(child_path)
+            found.extend(sensitive_mcp_paths(child, child_path))
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            found.extend(sensitive_mcp_paths(child, f"{path}[{index}]"))
+    return found
+
+
+def command_setup_direct(args: argparse.Namespace) -> int:
+    """Materialize only the selected Claude Code MCP servers for the direct arm."""
+    config_path, cfg = load_config(args.config)
+    root = repo_root_for_config(config_path)
+    acfg = arm_config(cfg, "direct")
+
+    requested_raw = args.servers or acfg.get("expected_mcp_servers") or []
+    if isinstance(requested_raw, str):
+        requested = [item.strip() for item in requested_raw.split(",") if item.strip()]
+    else:
+        requested = [str(item).strip() for item in requested_raw if str(item).strip()]
+    if not requested:
+        raise EvalError(
+            "No direct servers selected. Add arms.direct.expected_mcp_servers to the eval config "
+            "or pass --servers slack,atlassian,..."
+        )
+
+    source = Path(args.source).expanduser().resolve()
+    if not source.exists():
+        raise EvalError(f"Claude Code MCP source config not found: {source}")
+    source_data = read_json(source)
+    source_servers = source_data.get("mcpServers") if isinstance(source_data, dict) else None
+    if not isinstance(source_servers, dict):
+        raise EvalError(
+            f"No top-level mcpServers object found in {source}. "
+            "Use Claude Code's user config (~/.claude.json), not Claude Desktop's "
+            "new Connectors state file."
+        )
+
+    by_normalized = {normalize_server_name(name): name for name in source_servers}
+    missing = [name for name in requested if normalize_server_name(name) not in by_normalized]
+    if missing:
+        available = sorted(str(name) for name in source_servers)
+        raise EvalError(
+            f"Direct MCP servers are not configured in {source}: {', '.join(missing)}. "
+            f"Available servers: {', '.join(available) if available else '(none)'}. "
+            "Authenticate/add the missing servers with Claude Code, then rerun setup-direct."
+        )
+
+    selected = {}
+    for requested_name in requested:
+        actual_name = by_normalized[normalize_server_name(requested_name)]
+        selected[actual_name] = copy.deepcopy(source_servers[actual_name])
+
+    output = Path(args.output).expanduser()
+    if not output.is_absolute():
+        output = root / output
+    payload = {"mcpServers": selected}
+    if args.dry_run:
+        print(json.dumps({
+            "source": str(source),
+            "output": str(output.resolve()),
+            "servers": list(selected),
+            "sensitive_fields_copied": sensitive_mcp_paths(payload),
+            "dry_run": True,
+        }, indent=2))
+        return 0
+
+    write_json(output, payload)
+    print(json.dumps({
+        "source": str(source),
+        "output": str(output.resolve()),
+        "servers": list(selected),
+        "sensitive_fields_copied": sensitive_mcp_paths(payload),
+        "warning": "Keep the generated MCP config local; it may contain auth headers or client secrets.",
+    }, indent=2))
+    return 0
+
+
 def repo_root_for_config(config_path: Path) -> Path:
     return config_path.parent
+
+
+def load_server_profile(path: str, profile_name: str) -> Dict[str, Any]:
+    profile_path = Path(path).expanduser().resolve()
+    if not profile_path.exists():
+        raise EvalError(f"Server profile file not found: {profile_path}")
+    data = read_json(profile_path)
+    profiles = data.get("profiles") if isinstance(data, dict) else None
+    profile = profiles.get(profile_name) if isinstance(profiles, dict) else None
+    if not isinstance(profile, dict):
+        available = sorted(profiles) if isinstance(profiles, dict) else []
+        raise EvalError(
+            f"Server profile {profile_name!r} not found in {profile_path}. "
+            f"Available profiles: {', '.join(available) or '(none)'}"
+        )
+    servers = profile.get("direct_servers")
+    if not isinstance(servers, list) or not all(isinstance(s, str) and s.strip() for s in servers):
+        raise EvalError(f"Profile {profile_name!r} must define a non-empty direct_servers list")
+    return profile
+
+
+def command_setup(args: argparse.Namespace) -> int:
+    """Create local config files and apply a shareable direct-server profile."""
+    config_path = Path(args.config).expanduser().resolve()
+    root = config_path.parent
+    examples = {
+        config_path: root / "config" / "eval.config.strict.example.json",
+        root / "golden_prompts.tsv": root / "prompts" / "golden_prompts.example.tsv",
+        root / "mcp" / "glean.mcp.json": root / "config" / "mcp.glean.example.json",
+        root / "mcp" / "direct.mcp.json": root / "config" / "mcp.direct.example.json",
+    }
+    for destination, source in examples.items():
+        if destination.exists() and not args.force:
+            continue
+        if not source.exists():
+            raise EvalError(f"Example file not found: {source}")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
+
+    cfg = read_json(config_path)
+    profile = load_server_profile(args.profile_file, args.profile)
+    direct = arm_config(cfg, "direct")
+    direct["label"] = profile.get("label") or f"{args.profile} (direct)"
+    direct["expected_mcp_servers"] = list(profile["direct_servers"])
+    direct["preflight_prompt"] = profile.get(
+        "preflight_prompt",
+        "Use each direct MCP server for one harmless read-only lookup or search and confirm which servers retrieved data.",
+    )
+    write_json(config_path, cfg)
+    print(json.dumps({
+        "config": str(config_path),
+        "profile": args.profile,
+        "direct_servers": direct["expected_mcp_servers"],
+        "created_or_preserved": [str(p) for p in examples],
+        "next": [
+            f"claude mcp list",
+            f"python3 scripts/glean_mcp_eval.py setup-direct --config {config_path.name}",
+            f"python3 scripts/glean_mcp_eval.py doctor --config {config_path.name}",
+        ],
+    }, indent=2))
+    return 0
 
 
 def results_dir(config_path: Path, cfg: Dict[str, Any]) -> Path:
@@ -919,6 +1067,14 @@ def command_run(args: argparse.Namespace) -> int:
     acfg = arm_config(cfg, args.arm)
     host = getattr(args, "host", None) or cfg.get("host") or "claude-code"
     prompts = load_prompts(config_path, cfg)
+    prompt_ids = set(getattr(args, "prompt_ids", []) or [])
+    if prompt_ids:
+        unknown = sorted(prompt_ids - {safe_prompt_id(row["ID"]) for row in prompts})
+        if unknown:
+            raise EvalError(f"Unknown prompt IDs: {', '.join(unknown)}")
+        prompts = [row for row in prompts if safe_prompt_id(row["ID"]) in prompt_ids]
+    if not prompts:
+        raise EvalError("No prompts selected")
     if not args.force and not args.dry_run:
         require_passing_preflight(config_path, cfg, args.arm)
     out_root = results_dir(config_path, cfg) / args.participant_id / args.arm
@@ -936,6 +1092,13 @@ def command_run(args: argparse.Namespace) -> int:
         pid = safe_prompt_id(row["ID"])
         prompt_text = render_wrapper(wrapper, row)
         run_dir = out_root / pid
+        existing_run = run_dir / "run.json"
+        if not args.dry_run and not getattr(args, "rerun_existing", False) and existing_run.exists():
+            existing = read_json(existing_run)
+            if existing.get("success") is True:
+                manifest["runs"].append({"id": row.get("ID"), "dir": str(run_dir), "success": True, "skipped": True})
+                print(f"[{i}/{len(prompts)}] {args.arm} {pid}: skipped existing success", flush=True)
+                continue
         metadata = {
             "id": row.get("ID"),
             "dept": row.get("Dept", ""),
@@ -982,8 +1145,81 @@ def command_run(args: argparse.Namespace) -> int:
     manifest["completed_at"] = now_iso()
     manifest["failure_count"] = failures
     write_json(out_root / "arm_manifest.json", manifest)
-    print(json.dumps({"participant_id": args.participant_id, "arm": args.arm, "runs": len(prompts), "failures": failures, "results_dir": str(out_root)}, indent=2))
+    executed = sum(1 for run in manifest["runs"] if not run.get("skipped"))
+    print(json.dumps({"participant_id": args.participant_id, "arm": args.arm, "runs": len(prompts), "executed": executed, "failures": failures, "results_dir": str(out_root)}, indent=2))
     return 0 if failures == 0 else 1
+
+
+def command_smoke_test(args: argparse.Namespace) -> int:
+    """Run a cheap three-prompt validation for both arms."""
+    config_path, cfg = load_config(args.config)
+    prompts = load_prompts(config_path, cfg)
+    prompt_ids = [safe_prompt_id(row["ID"]) for row in prompts[:args.prompt_count]]
+    if len(prompt_ids) < args.prompt_count:
+        raise EvalError(f"Only {len(prompt_ids)} prompts are available; cannot run a {args.prompt_count}-prompt smoke test")
+    arms = [args.arm] if args.arm != "both" else ["glean", "direct"]
+    for arm in arms:
+        preflight_args = argparse.Namespace(config=args.config, host=args.host, arm=arm, live=True, dry_run=args.dry_run)
+        rc = command_preflight(preflight_args)
+        if rc != 0:
+            return rc
+    for arm in arms:
+        run_args = argparse.Namespace(
+            config=args.config, host=args.host, arm=arm, participant_id=args.participant_id,
+            dry_run=args.dry_run, force=args.force, prompt_ids=prompt_ids, rerun_existing=args.rerun_existing,
+        )
+        rc = command_run(run_args)
+        if rc != 0:
+            return rc
+    print(json.dumps({"smoke_test": True, "participant_id": args.participant_id, "prompt_ids": prompt_ids, "arms": arms}, indent=2))
+    return 0
+
+
+def command_run_cli(args: argparse.Namespace) -> int:
+    args.prompt_ids = [safe_prompt_id(x.strip()) for x in args.prompt_ids.split(",") if x.strip()] if args.prompt_ids else []
+    return command_run(args)
+
+
+def command_run_all(args: argparse.Namespace) -> int:
+    """Run both arms, then grade, report, and optionally package."""
+    config_path, cfg = load_config(args.config)
+    arms = list((cfg.get("arms") or {}).keys())
+    if not {"glean", "direct"}.issubset(arms):
+        raise EvalError("run-all requires both glean and direct arms in the config")
+    if args.dry_run:
+        print(json.dumps({
+            "dry_run": True,
+            "participant_id": args.participant_id,
+            "steps": ["preflight glean", "preflight direct", "run glean", "run direct", "grade", "report", "package" if not args.no_package else "skip package"],
+        }, indent=2))
+        return 0
+    if args.smoke:
+        smoke_args = argparse.Namespace(
+            config=args.config, host=args.host, arm="both", participant_id=args.participant_id,
+            prompt_count=3, dry_run=args.dry_run, force=args.force, rerun_existing=args.rerun_existing,
+        )
+        return command_smoke_test(smoke_args)
+    for arm in ("glean", "direct"):
+        run_args = argparse.Namespace(
+            config=args.config, host=args.host, arm=arm, participant_id=args.participant_id,
+            dry_run=args.dry_run, force=args.force, prompt_ids=[], rerun_existing=args.rerun_existing,
+        )
+        rc = command_run(run_args)
+        if rc != 0:
+            return rc
+    grade_args = argparse.Namespace(config=args.config, participant_id=args.participant_id, force=args.force)
+    rc = command_grade(grade_args)
+    if rc != 0:
+        return rc
+    rc = command_report(argparse.Namespace(config=args.config))
+    if rc != 0:
+        return rc
+    if not args.no_package:
+        rc = command_package(argparse.Namespace(config=args.config))
+        if rc != 0:
+            return rc
+    print(json.dumps({"run_all": True, "participant_id": args.participant_id, "packaged": not args.no_package}, indent=2))
+    return 0
 
 
 def grade_schema() -> Dict[str, Any]:
@@ -1661,6 +1897,32 @@ def build_parser() -> argparse.ArgumentParser:
     def add_host(sp: argparse.ArgumentParser) -> None:
         sp.add_argument("--host", help="Host adapter: 'claude-code' (default) or 'cursor'; overrides config 'host'")
 
+    sp = sub.add_parser("setup", help="Create local eval files and apply a direct-server profile")
+    add_config(sp)
+    sp.add_argument("--profile", default="current-reference", help="Server profile name")
+    sp.add_argument("--profile-file", default="config/server-profiles.example.json", help="Server profile JSON")
+    sp.add_argument("--force", action="store_true", help="Overwrite generated local files")
+    sp.set_defaults(func=command_setup)
+
+    sp = sub.add_parser("setup-direct", help="Copy selected Claude Code MCP definitions into the strict direct-arm config")
+    add_config(sp)
+    sp.add_argument(
+        "--source",
+        default=str(Path.home() / ".claude.json"),
+        help="Claude Code MCP config to read (default: ~/.claude.json)",
+    )
+    sp.add_argument(
+        "--servers",
+        help="Comma-separated direct server names; defaults to arms.direct.expected_mcp_servers",
+    )
+    sp.add_argument(
+        "--output",
+        default="mcp/direct.mcp.json",
+        help="Generated strict MCP config path, relative to the eval config directory",
+    )
+    sp.add_argument("--dry-run", action="store_true", help="Show the selected servers without writing the output")
+    sp.set_defaults(func=command_setup_direct)
+
     sp = sub.add_parser("doctor", help="Inspect local config and host/MCP availability")
     add_config(sp)
     add_host(sp)
@@ -1674,14 +1936,38 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--dry-run", action="store_true", help="Print the exact command without executing")
     sp.set_defaults(func=command_preflight)
 
-    sp = sub.add_parser("run", help="Run all prompts for one participant/arm")
+    sp = sub.add_parser("run", help="Run selected or all prompts for one participant/arm")
     add_config(sp)
     add_host(sp)
     sp.add_argument("--arm", required=True, help="Arm name from config, e.g. glean or direct")
     sp.add_argument("--participant-id", required=True, help="Stable anonymous participant ID")
+    sp.add_argument("--prompt-ids", help="Comma-separated prompt IDs to run")
     sp.add_argument("--dry-run", action="store_true", help="Print the exact host commands without executing")
     sp.add_argument("--force", action="store_true", help="Run even if latest live preflight is missing or failed")
-    sp.set_defaults(func=command_run)
+    sp.add_argument("--rerun-existing", action="store_true", help="Rerun prompts with an existing successful run")
+    sp.set_defaults(func=command_run_cli)
+
+    sp = sub.add_parser("smoke-test", help="Preflight both arms and run a small prompt subset")
+    add_config(sp)
+    add_host(sp)
+    sp.add_argument("--arm", default="both", choices=["both", "glean", "direct"])
+    sp.add_argument("--participant-id", required=True)
+    sp.add_argument("--prompt-count", type=int, default=3)
+    sp.add_argument("--dry-run", action="store_true")
+    sp.add_argument("--force", action="store_true")
+    sp.add_argument("--rerun-existing", action="store_true")
+    sp.set_defaults(func=command_smoke_test)
+
+    sp = sub.add_parser("run-all", help="Run both arms, grade, report, and package")
+    add_config(sp)
+    add_host(sp)
+    sp.add_argument("--participant-id", required=True)
+    sp.add_argument("--smoke", action="store_true", help="Run the three-prompt smoke test instead of the full eval")
+    sp.add_argument("--no-package", action="store_true")
+    sp.add_argument("--dry-run", action="store_true")
+    sp.add_argument("--force", action="store_true")
+    sp.add_argument("--rerun-existing", action="store_true")
+    sp.set_defaults(func=command_run_all)
 
     sp = sub.add_parser("grade", help="Judge paired Glean/direct answers")
     add_config(sp)

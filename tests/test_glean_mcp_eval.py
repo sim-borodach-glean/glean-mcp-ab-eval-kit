@@ -138,6 +138,51 @@ class PromptValidationTest(unittest.TestCase):
             self.assertIn("line 3", str(cm.exception))
 
 
+class SetupDirectTest(unittest.TestCase):
+    def test_setup_direct_filters_source_servers(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = root / "claude.json"
+            source.write_text(json.dumps({
+                "mcpServers": {
+                    "glean_default": {"type": "http", "url": "https://glean.example/mcp"},
+                    "slack": {"type": "http", "url": "https://slack.example/mcp"},
+                    "atlassian": {"type": "http", "url": "https://atlassian.example/mcp"},
+                }
+            }), encoding="utf-8")
+            config = root / "eval.config.json"
+            config.write_text(json.dumps({
+                "arms": {"direct": {"expected_mcp_servers": ["slack", "atlassian"]}}
+            }), encoding="utf-8")
+            output = root / "mcp" / "direct.mcp.json"
+            rc = gme.main([
+                "setup-direct",
+                "--config", str(config),
+                "--source", str(source),
+                "--output", str(output),
+            ])
+            self.assertEqual(rc, 0)
+            generated = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(sorted(generated["mcpServers"]), ["atlassian", "slack"])
+            self.assertNotIn("glean_default", generated["mcpServers"])
+
+    def test_setup_direct_fails_when_expected_server_is_missing(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = root / "claude.json"
+            source.write_text(json.dumps({"mcpServers": {"slack": {}}}), encoding="utf-8")
+            config = root / "eval.config.json"
+            config.write_text(json.dumps({
+                "arms": {"direct": {"expected_mcp_servers": ["slack", "github"]}}
+            }), encoding="utf-8")
+            rc = gme.main([
+                "setup-direct",
+                "--config", str(config),
+                "--source", str(source),
+            ])
+            self.assertEqual(rc, 2)
+
+
 class StrictMcpDiagnosticsTest(unittest.TestCase):
     def test_placeholder_mcp_config_fails_static_validation(self):
         with tempfile.TemporaryDirectory() as td:
