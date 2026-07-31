@@ -1,14 +1,15 @@
 # End-user MCP setup for the A/B eval
 
-This runbook configures the five direct MCP servers used by the eval:
+This runbook configures the four direct MCP servers in the current reference profile:
 
 - `slack`
 - `atlassian`
 - `notion`
 - `github`
-- `gong`
 
-Run these commands in a normal terminal, not as prompts inside Claude. Use the exact server names above so they match `eval.config.json`.
+Glean is configured separately in the local `mcp/glean.mcp.json` file. Run these commands in a normal terminal, not as prompts inside Claude. Use the exact server names above so they match `eval.config.json`.
+
+After running `setup`, replace the placeholders in `mcp/glean.mcp.json` with the Glean MCP endpoint and authentication details supplied for your Glean instance. Keep that file local; it is ignored by Git and may contain authorization material.
 
 ## 0. Prerequisites
 
@@ -212,41 +213,7 @@ unset GITHUB_PAT
 
 The `/readonly` URL restricts the server to read tools. The Claude configuration still contains the authorization header locally, so keep the config private.
 
-## 5. Gong — official remote server
-
-### Prerequisites
-
-Gong's MCP endpoint is:
-
-```text
-https://mcp.gong.io/mcp
-```
-
-Gong's MCP OAuth flow does not support dynamic client registration. A Gong Technical Administrator must create or approve an OAuth integration and provide its Client ID and Client Secret. The integration needs read-only scopes for calls, transcripts, metadata, users, and any required conversation-intelligence objects.
-
-Use Gong's [OAuth app setup guide](https://help.gong.io/docs/create-an-app-for-gong) to create the integration and register the localhost callback URI required by Claude Code.
-
-### Add and authenticate
-
-```bash
-export GONG_CLIENT_ID="<GONG_OAUTH_CLIENT_ID>"
-
-claude mcp add \
-  --scope user \
-  --transport http \
-  --client-id "$GONG_CLIENT_ID" \
-  --client-secret \
-  --callback-port 3119 \
-  gong \
-  https://mcp.gong.io/mcp
-
-unset GONG_CLIENT_ID
-claude mcp login gong
-```
-
-The `--client-secret` option prompts for the secret without placing it in shell history. Do not send the Client Secret in chat or commit it to the eval directory. If Claude Code cannot complete Gong's custom OAuth flow, the Gong integration owner will need to confirm the registered callback URI and supported client flow.
-
-## 6. Recommended: generate the strict direct-arm config
+## 5. Recommended: generate the strict direct-arm config
 
 The eval does not use Claude Desktop's Connector state directly. The runner uses its own ignored, strict MCP file so the direct arm cannot see `glean_default` or any unrelated ambient servers.
 
@@ -275,12 +242,12 @@ You can override the selected server set explicitly:
 ```bash
 python3 scripts/glean_mcp_eval.py setup-direct \
   --config eval.config.json \
-  --servers slack,atlassian,notion,github,gong
+  --servers slack,atlassian,notion,github
 ```
 
 The generated file is ignored by Git, but it may contain local authorization headers or OAuth metadata. Never commit or share it.
 
-## 7. Verify all five servers
+## 6. Verify all four direct servers
 
 ```bash
 claude mcp list
@@ -289,7 +256,6 @@ claude mcp get slack
 claude mcp get atlassian
 claude mcp get notion
 claude mcp get github
-claude mcp get gong
 ```
 
 Then start Claude Code in the eval folder:
@@ -305,9 +271,9 @@ Inside Claude Code, run:
 /mcp
 ```
 
-Confirm that all five servers are connected and record the exact read/search tool names. Do not invoke write tools during verification.
+Confirm that all four direct servers are connected and record the exact read/search tool names. Also confirm the configured Glean server is available. Do not invoke write tools during verification.
 
-## 8. Verify the strict configuration
+## 7. Verify the strict configuration
 
 The A/B kit uses strict mode, so the run itself uses the generated file under `mcp/`, not whatever unrelated servers happen to be enabled globally.
 
@@ -320,7 +286,8 @@ python3 scripts/glean_mcp_eval.py doctor --config eval.config.json
 
 For the strict config, preserve:
 
-- Server names exactly: `slack`, `atlassian`, `notion`, `github`, `gong`
+- Direct server names exactly: `slack`, `atlassian`, `notion`, `github`
+- Glean server name exactly: `glean_default` in the Glean arm only
 - The exact transport and endpoint/command
 - Required non-secret OAuth metadata or headers
 - No extra MCP servers
@@ -329,7 +296,7 @@ Then update `eval.config.json` with:
 
 - Exact read/search tool names in `arms.direct.allowed_tools`
 - All write/mutation tools in `arms.direct.disallowed_tools`
-- The same five names in `arms.direct.expected_mcp_servers`
+- The same four names in `arms.direct.expected_mcp_servers`
 - `glean_default` in the Glean arm only
 
 Run validation before the eval:
@@ -358,6 +325,5 @@ Do not run the evaluation if a server is missing, a placeholder remains, or a wr
 | Notion OAuth fails | Run `/mcp` inside Claude Code, select `notion`, and complete the browser OAuth flow. Confirm the user has access to the intended Notion workspace and pages. |
 | `SDK auth failed: Unable to connect` | The local server is not listening on port 8000, or the `WORKSPACE_MCP_PORT`/URL do not match. |
 | GitHub returns forbidden | Check the fine-grained PAT repository selection and read-only Contents/Issues/Pull requests permissions. |
-| Gong OAuth fails | Confirm the Gong integration is approved, the Client ID/Secret are correct, the callback URI is registered, and the integration has read-only call/transcript scopes. |
 | Strict preflight sees no tools | Compare `mcp/direct.mcp.json` with `claude mcp get <name>` and verify the transport, endpoint, auth metadata, and server name exactly match. |
 | A live run tries to write | Stop the run; remove the write tool from `allowed_tools`, add it to `disallowed_tools`, and rerun preflight. |

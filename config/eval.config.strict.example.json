@@ -24,17 +24,47 @@
     "glean": {
       "label": "Glean MCP",
       "mcp_config": "mcp/glean.mcp.json",
-      "expected_mcp_servers": ["glean_default"],
-      "forbidden_mcp_servers": ["atlassian", "slack", "jira", "confluence", "github", "notion", "google_drive", "gmail", "outlook", "zoom"],
-      "allowed_tools": ["mcp__glean_default__search", "mcp__glean_default__read_document", "mcp__glean_default__chat", "mcp__glean_default__employee_search"],
-      "disallowed_tools": ["mcp__glean_default__run_tool", "mcp__glean_default__find_skills", "mcp__glean_default__read_skill_files"],
+      "expected_mcp_servers": [
+        "glean_default"
+      ],
+      "forbidden_mcp_servers": [
+        "atlassian",
+        "slack",
+        "jira",
+        "confluence",
+        "github",
+        "notion",
+        "google_drive",
+        "gmail",
+        "outlook",
+        "zoom"
+      ],
+      "allowed_tools": [
+        "mcp__glean_default__search",
+        "mcp__glean_default__read_document",
+        "mcp__glean_default__chat",
+        "mcp__glean_default__employee_search"
+      ],
+      "disallowed_tools": [
+        "mcp__glean_default__run_tool",
+        "mcp__glean_default__find_skills",
+        "mcp__glean_default__read_skill_files"
+      ],
       "preflight_prompt": "Use the Glean MCP tools to perform a harmless read-only search for a known internal page and return a one-sentence confirmation that retrieval worked."
     },
     "direct": {
-      "label": "Atlassian + Slack (direct)",
+      "label": "Slack + Atlassian + Notion + GitHub (direct)",
       "mcp_config": "mcp/direct.mcp.json",
-      "expected_mcp_servers": ["atlassian", "slack"],
-      "forbidden_mcp_servers": ["glean_default", "glean"],
+      "expected_mcp_servers": [
+        "slack",
+        "atlassian",
+        "notion",
+        "github"
+      ],
+      "forbidden_mcp_servers": [
+        "glean_default",
+        "glean"
+      ],
       "allowed_tools": [
         "mcp__atlassian__search",
         "mcp__atlassian__getAccessibleAtlassianResources",
@@ -50,7 +80,9 @@
         "mcp__slack__slack_search_channels",
         "mcp__slack__slack_read_channel",
         "mcp__slack__slack_read_thread",
-        "mcp__slack__slack_read_user_profile"
+        "mcp__slack__slack_read_user_profile",
+        "mcp__notion__notion-search",
+        "mcp__github__search_repositories"
       ],
       "disallowed_tools": [
         "mcp__atlassian__addCommentToJiraIssue",
@@ -67,7 +99,7 @@
         "mcp__slack__slack_schedule_message",
         "mcp__slack__slack_send_message_draft"
       ],
-      "preflight_prompt": "Use Atlassian MCP to perform a harmless read-only lookup, then use Slack MCP to perform a harmless read-only search. Return one sentence confirming both retrievals worked."
+      "preflight_prompt": "Use each of the four direct MCP servers\u2014Slack, Atlassian, Notion, and GitHub\u2014for one harmless read-only lookup or search. Return one sentence confirming which servers retrieved data."
     }
   }
 }

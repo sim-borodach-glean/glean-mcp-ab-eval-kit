@@ -28,10 +28,11 @@ Claude Code should explain each command before running it. Browser-based OAuth i
 
 1. Confirm Claude Code login and Python.
 2. Run `setup --profile current-reference` to create the local config and copy the shipped 16-prompt reference suite.
-3. Check `claude mcp list`.
-4. Add/authenticate missing MCPs one at a time using the vendor instructions in [END_USER_MCP_SETUP.md](END_USER_MCP_SETUP.md).
-5. Read the expected direct MCP names from `eval.config.json`.
-6. Run:
+3. Complete the local Glean MCP configuration described in [END_USER_MCP_SETUP.md](END_USER_MCP_SETUP.md).
+4. Check `claude mcp list`.
+5. Add/authenticate missing direct MCPs one at a time using the vendor instructions in [END_USER_MCP_SETUP.md](END_USER_MCP_SETUP.md).
+6. Read the expected direct MCP names from `eval.config.json`.
+7. Run:
 
 ```bash
 python3 scripts/glean_mcp_eval.py setup-direct --config eval.config.json --dry-run
@@ -41,8 +42,8 @@ python3 scripts/glean_mcp_eval.py preflight --config eval.config.json --arm glea
 python3 scripts/glean_mcp_eval.py preflight --config eval.config.json --arm direct --live
 ```
 
-7. Stop if either preflight fails.
-8. With approval, run the smoke test:
+8. Stop if either preflight fails.
+9. With approval, run the smoke test:
 
 ```bash
 python3 scripts/glean_mcp_eval.py smoke-test \
@@ -50,7 +51,7 @@ python3 scripts/glean_mcp_eval.py smoke-test \
   --participant-id smoke01
 ```
 
-9. With approval after the smoke test, run the full evaluation:
+10. With approval after the smoke test, run the full evaluation:
 
 ```bash
 python3 scripts/glean_mcp_eval.py run-all \
