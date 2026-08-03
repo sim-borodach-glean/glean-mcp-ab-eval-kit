@@ -1780,6 +1780,42 @@ Winner counts: `{dict(winner_counts)}`
             "The tables below are included for debugging only.\n"
         )
 
+    # Host-aware cost section: some hosts (e.g. Cursor) expose no per-run vendor
+    # cost, so we drop the always-$0 "reported cost" row and present the
+    # list-price-normalized figure as the cost metric instead of referencing a
+    # specific vendor's reported cost.
+    host = cfg.get("host") or "claude-code"
+    host_label = {"cursor": "Cursor", "claude-code": "Claude Code"}.get(host, host)
+    try:
+        reported_cost_available = bool(get_adapter(host).caps.get("reported_cost"))
+    except Exception:
+        reported_cost_available = True
+    if reported_cost_available:
+        cost_md = f"""## Cost
+
+Primary metric is the cost {host_label} reports per run. List-price-normalized cost applies the configurable `pricing_per_million` rates uniformly across both arms.
+
+| Metric | Glean MCP | Direct MCP | Delta |
+|---|---:|---:|---:|
+| Avg reported cost / task | ${g_rc_avg:,.4f} | ${d_rc_avg:,.4f} | {format_delta(reported_cost_savings)} |
+| Avg list-price-normalized cost / task | ${gc_avg:,.4f} | ${dc_avg:,.4f} | {format_delta(list_cost_savings)} |
+
+> List-price-normalized cost is a rate-card comparison, not billed spend. Verify `pricing_per_million` against current model list prices; it can diverge sharply from reported cost when cache-creation tokens dominate.
+>
+> Reported-cost savings for Glean: **{reported_cost_savings:.1f}%**{ci_str(reported_cost_ci)}."""
+        tokens_headline_note = "Prefer marginal tokens + reported cost for headline claims."
+    else:
+        cost_md = f"""## Cost
+
+{host_label} does not expose a per-run vendor dollar cost, so the cost metric is **list-price-normalized**: the configurable `pricing_per_million` rate card applied uniformly to both arms' token usage. It is a rate-card comparison, not billed spend.
+
+| Metric | Glean MCP | Direct MCP | Delta |
+|---|---:|---:|---:|
+| Avg list-price-normalized cost / task | ${gc_avg:,.4f} | ${dc_avg:,.4f} | {format_delta(list_cost_savings)} |
+
+> Compare on this normalized cost plus marginal tokens and latency — not on any vendor-reported dollar figure."""
+        tokens_headline_note = "Prefer marginal tokens + latency for headline claims."
+
     md = f"""# Aggregate summary
 
 Generated: {now_iso()}
@@ -1806,18 +1842,7 @@ Eval: `{cfg.get('eval_name', '')}`
 
 {mcp_usage_md}
 
-## Cost
-
-Primary metric is the cost Claude Code reports per run. List-price-normalized cost applies the configurable `pricing_per_million` rates uniformly across both arms.
-
-| Metric | Glean MCP | Direct MCP | Delta |
-|---|---:|---:|---:|
-| Avg reported cost / task | ${g_rc_avg:,.4f} | ${d_rc_avg:,.4f} | {format_delta(reported_cost_savings)} |
-| Avg list-price-normalized cost / task | ${gc_avg:,.4f} | ${dc_avg:,.4f} | {format_delta(list_cost_savings)} |
-
-> List-price-normalized cost is a rate-card comparison, not billed spend. Verify `pricing_per_million` against current model list prices; it can diverge sharply from reported cost when cache-creation tokens dominate.
->
-> Reported-cost savings for Glean: **{reported_cost_savings:.1f}%**{ci_str(reported_cost_ci)}.
+{cost_md}
 
 ## Tokens
 
@@ -1829,7 +1854,7 @@ Marginal = per-prompt work (input + output). Fixed = per-session cache creation 
 | Avg fixed (cache-creation) tokens / task | {g_fixed_avg:,.0f} | {d_fixed_avg:,.0f} | — |
 | Avg total tokens / task | {gt_avg:,.0f} | {dt_avg:,.0f} | {format_delta(total_token_savings)} |
 
-> Prefer marginal tokens + reported cost for headline claims. Raw totals are dominated by per-session cache creation and can mislead.
+> {tokens_headline_note} Raw totals are dominated by per-session cache creation and can mislead.
 >
 > Marginal-token savings for Glean: **{marginal_savings:.1f}%**{ci_str(marginal_ci)}.
 
