@@ -1015,7 +1015,7 @@ def command_preflight(args: argparse.Namespace) -> int:
     write_json(out / "preflight.json", record)
     latest = results_dir(config_path, cfg) / "_preflight" / args.arm / "latest.json"
     write_json(latest, record)
-    print(json.dumps({"preflight_path": str(out / "preflight.json"), **summary}, indent=2))
+    print(f"Preflight details written to {out / 'preflight.json'}", flush=True)
     if overall_pass:
         live_note = " (live tools verified)" if args.live else " (static only; add --live to verify tools)"
         print(f"\n✅ PREFLIGHT PASSED — arm '{args.arm}' on host '{host}'{live_note}.", flush=True)
@@ -1153,12 +1153,12 @@ def command_run(args: argparse.Namespace) -> int:
         if not args.dry_run:
             write_json(run_dir / "metadata.json", metadata)
         dept = row.get("Dept", "")
-        preview = " ".join((row.get("Prompt") or "").split())[:80]
+        full_prompt = " ".join((row.get("Prompt") or "").split())
         print(
-            f"[{i}/{len(prompts)}] {now_iso()} {args.arm}/{pid} "
-            f"({dept}): running… \"{preview}{'…' if len((row.get('Prompt') or '')) > 80 else ''}\"",
+            f"[{i}/{len(prompts)}] {now_iso()} {args.arm}/{pid} ({dept}): running…",
             flush=True,
         )
+        print(f"    prompt: {full_prompt}", flush=True)
         started = time.time()
         rec = run_claude_and_record(
             root,
