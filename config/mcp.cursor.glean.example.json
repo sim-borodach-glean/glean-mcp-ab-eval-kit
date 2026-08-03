@@ -1,0 +1,9 @@
+{
+  "_comment": "Cursor-shaped Glean arm MCP config. Copy to mcp/glean.mcp.json. The server key MUST match the glean_default identifier in your ~/.cursor/mcp.json so cursor-agent reuses its stored auth. Replace the subdomain with your Glean instance.",
+  "mcpServers": {
+    "glean_default": {
+      "type": "http",
+      "url": "https://<your-glean-subdomain>-be.glean.com/mcp/default"
+    }
+  }
+}

@@ -1,0 +1,4 @@
+ID	Dept	Prompt
+ENG_001	Engineering	Summarize the current status of the Glean MCP (Model Context Protocol) server work. What has recently shipped or been discussed, who is involved, and what are the open risks or next steps? Cite tickets, docs, or messages.
+IT_001	IT/Security	Summarize the company's access management / provisioning policy. Who approves sensitive access, how are service credentials handled, and when was the policy last updated? Cite the source document.
+HR_001	HR/People Ops	What is the company's PTO / paid time off policy? Does PTO accrue or carry over, what happens at termination, and what approvals are required for extended leave? Cite the source document.

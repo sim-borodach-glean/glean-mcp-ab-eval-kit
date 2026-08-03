@@ -1,0 +1,13 @@
+{
+  "_comment": "Cursor-shaped vendor-direct arm MCP config (3-prompt baseline = Atlassian + Slack). Copy to mcp/direct.mcp.json. Server keys MUST match the identifiers in your ~/.cursor/mcp.json so cursor-agent reuses stored auth (note Atlassian is 'Atlassian-MCP-Server', not 'atlassian').",
+  "mcpServers": {
+    "Atlassian-MCP-Server": {
+      "type": "http",
+      "url": "https://mcp.atlassian.com/v1/mcp"
+    },
+    "slack": {
+      "type": "http",
+      "url": "https://mcp.slack.com/mcp"
+    }
+  }
+}
