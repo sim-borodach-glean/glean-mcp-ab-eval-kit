@@ -23,10 +23,45 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from .base import HostAdapter, register
+
+
+def _cursor_bin() -> str:
+    return shutil.which("cursor-agent") or "cursor-agent"
+
+
+def _run_mcp(*args: str, timeout: int = 120) -> subprocess.CompletedProcess:
+    """Run a `cursor-agent mcp ...` subcommand, capturing text output."""
+    return subprocess.run(
+        [_cursor_bin(), "mcp", *args],
+        text=True, capture_output=True, timeout=timeout, check=False,
+    )
+
+
+def _parse_mcp_list() -> Dict[str, str]:
+    """Return {server_identifier: status} from `cursor-agent mcp list`.
+
+    Lines look like `glean_default: ready` or `slack: requires_authentication`.
+    Status is lowercased; server identifiers are kept verbatim (they are the
+    handles `mcp enable/disable/login` expect)."""
+    out: Dict[str, str] = {}
+    try:
+        proc = _run_mcp("list", timeout=60)
+    except Exception:
+        return out
+    for line in (proc.stdout or "").splitlines():
+        if ":" not in line:
+            continue
+        name, _, status = line.partition(":")
+        name = name.strip()
+        status = status.strip().lower()
+        if name and status:
+            out[name] = status
+    return out
 
 
 def _normalize_server_name(name: Optional[str]) -> Optional[str]:
@@ -209,6 +244,78 @@ class CursorAdapter(HostAdapter):
         (cdir / "cli.json").write_text(
             json.dumps({"permissions": ctx.get("permissions", {})}, indent=2), encoding="utf-8"
         )
+
+    # --- Per-arm isolation + auth -------------------------------------------
+    # cursor-agent MERGES the global ~/.cursor/mcp.json into every run, so
+    # `--workspace` alone does NOT isolate arms: forbidden servers (and, worse,
+    # the other arm's servers) leak in and the model will happily use them.
+    # We enforce real isolation by toggling the global approved list: enable
+    # only this arm's servers, disable everything else, then restore afterward.
+    _saved_mcp_state: Dict[str, str] = {}
+
+    def _arm_server_ids(self, arm_cfg: Dict[str, Any]) -> List[str]:
+        """Server identifiers this arm needs, in the exact case cursor-agent
+        uses (they double as `mcp enable/disable/login` handles)."""
+        ids: List[str] = []
+        for s in arm_cfg.get("expected_mcp_servers", []) or []:
+            if s and s not in ids:
+                ids.append(str(s))
+        for name in (_load_arm_servers(Path("."), arm_cfg) or {}).keys():
+            if name not in ids:
+                ids.append(name)
+        return ids
+
+    def setup_arm(self, root: Path, cfg: Dict[str, Any], arm_cfg: Dict[str, Any], arm_name: str) -> None:
+        if not cfg.get("cursor_manage_global_mcp", True):
+            return
+        current = _parse_mcp_list()
+        if not current:
+            print("⚠ Could not read `cursor-agent mcp list`; skipping MCP isolation.", flush=True)
+            return
+        self._saved_mcp_state = dict(current)
+        keep = self._arm_server_ids(arm_cfg)
+        keep_norm = {_normalize_server_name(k) for k in keep}
+        enabled, disabled = [], []
+        for name in current:
+            if _normalize_server_name(name) in keep_norm:
+                _run_mcp("enable", name)
+                enabled.append(name)
+            elif current[name] != "disabled":
+                _run_mcp("disable", name)
+                disabled.append(name)
+        print(
+            f"🔒 Isolated '{arm_name}' arm MCP: enabled [{', '.join(enabled) or '—'}]; "
+            f"disabled [{', '.join(disabled) or '—'}]",
+            flush=True,
+        )
+        # Ensure each kept server is authenticated; log per-server so the user
+        # (running this from a plain terminal) knows exactly what to approve.
+        if cfg.get("cursor_ensure_auth", True):
+            for name in enabled:
+                status = _parse_mcp_list().get(name, "")
+                if status == "ready":
+                    print(f"✓ {name}: already authenticated", flush=True)
+                    continue
+                print(f"🔐 Authenticating {name} — a browser window may open for approval…", flush=True)
+                try:
+                    _run_mcp("login", name, timeout=180)
+                except Exception as e:
+                    print(f"✗ {name}: auth attempt errored ({e})", flush=True)
+                    continue
+                ok = _parse_mcp_list().get(name) == "ready"
+                print(f"{'✓' if ok else '✗'} Authentication {'complete' if ok else 'FAILED'}: {name}", flush=True)
+
+    def teardown_arm(self, root: Path, cfg: Dict[str, Any], arm_cfg: Dict[str, Any], arm_name: str) -> None:
+        if not cfg.get("cursor_manage_global_mcp", True) or not self._saved_mcp_state:
+            return
+        # Restore each server to the enabled/disabled state it had before this arm.
+        for name, status in self._saved_mcp_state.items():
+            if status == "disabled":
+                _run_mcp("disable", name)
+            else:
+                _run_mcp("enable", name)
+        self._saved_mcp_state = {}
+        print(f"↩ Restored global MCP server state after '{arm_name}' arm.", flush=True)
 
     def harvest(
         self,

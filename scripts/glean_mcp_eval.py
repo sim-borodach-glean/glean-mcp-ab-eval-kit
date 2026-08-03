@@ -960,17 +960,24 @@ def command_preflight(args: argparse.Namespace) -> int:
     live_pass = None
     if args.live:
         prompt = acfg.get("preflight_prompt") or f"Use the {args.arm} retrieval tools once and report whether setup works."
-        live_record = run_claude_and_record(
-            root,
-            cfg,
-            acfg,
-            prompt,
-            out / "live",
-            timeout=int(cfg.get("preflight_timeout_seconds", 300)),
-            max_turns=int(cfg.get("preflight_max_turns", 6)),
-            dry_run=args.dry_run,
-            host=host,
-        )
+        adapter = get_adapter(host)
+        if not args.dry_run:
+            adapter.setup_arm(root, cfg, acfg, args.arm)
+        try:
+            live_record = run_claude_and_record(
+                root,
+                cfg,
+                acfg,
+                prompt,
+                out / "live",
+                timeout=int(cfg.get("preflight_timeout_seconds", 300)),
+                max_turns=int(cfg.get("preflight_max_turns", 6)),
+                dry_run=args.dry_run,
+                host=host,
+            )
+        finally:
+            if not args.dry_run:
+                adapter.teardown_arm(root, cfg, acfg, args.arm)
         observed = set((live_record.get("transcript") or {}).get("mcp_servers_used", {}).keys())
         required = set(normalize_server_name(x) for x in acfg.get("require_live_tool_servers", acfg.get("expected_mcp_servers", [])))
         missing_live_required = sorted(required - observed)
@@ -1098,6 +1105,7 @@ def command_run(args: argparse.Namespace) -> int:
         "runs": [],
     }
     failures = 0
+    adapter = get_adapter(host)
     if not args.dry_run:
         print(
             f"▶ Running arm '{args.arm}' on host '{host}' | model={cfg.get('model')} "
@@ -1105,8 +1113,10 @@ def command_run(args: argparse.Namespace) -> int:
             f"| results -> {out_root}",
             flush=True,
         )
+        adapter.setup_arm(root, cfg, acfg, args.arm)
     arm_started = time.time()
-    for i, row in enumerate(prompts, 1):
+    try:
+      for i, row in enumerate(prompts, 1):
         pid = safe_prompt_id(row["ID"])
         prompt_text = render_wrapper(wrapper, row)
         run_dir = out_root / pid
@@ -1171,6 +1181,9 @@ def command_run(args: argparse.Namespace) -> int:
             f"| retrieval={transcript.get('retrieval_attempted')}",
             flush=True,
         )
+    finally:
+        if not args.dry_run:
+            adapter.teardown_arm(root, cfg, acfg, args.arm)
     if not args.dry_run:
         print(
             f"■ Arm '{args.arm}' finished in {time.time() - arm_started:.1f}s "

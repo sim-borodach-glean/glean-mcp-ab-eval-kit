@@ -85,6 +85,18 @@ class HostAdapter:
         per-arm `.cursor/mcp.json` + `cli.json`). Default: no-op."""
         return None
 
+    def setup_arm(self, root: Path, cfg: Dict[str, Any], arm_cfg: Dict[str, Any], arm_name: str) -> None:
+        """Optional: prepare host-global state before an arm's prompts run
+        (e.g. Cursor isolates by enabling only this arm's MCP servers and
+        disabling the rest, then ensures they are authenticated). Called once
+        per arm by `run`/`preflight`, paired with teardown_arm(). Default: no-op."""
+        return None
+
+    def teardown_arm(self, root: Path, cfg: Dict[str, Any], arm_cfg: Dict[str, Any], arm_name: str) -> None:
+        """Optional: restore host-global state changed by setup_arm(). Runs in a
+        finally block so it executes even if the arm errors. Default: no-op."""
+        return None
+
     def harvest(
         self,
         proc: Dict[str, Any],
