@@ -21,11 +21,22 @@ Key differences from Claude Code (from Cursor docs, 2026-07):
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from .base import HostAdapter, register
+
+
+def _normalize_server_name(name: Optional[str]) -> Optional[str]:
+    """Match glean_mcp_eval.normalize_server_name so observed server names line
+    up with the normalized expected/forbidden names the core compares against.
+    Cursor emits canonical provider identifiers (e.g. "Atlassian-MCP-Server")
+    that would otherwise never match a normalized config entry."""
+    if not name:
+        return name
+    return re.sub(r"[^a-z0-9_-]+", "", name.lower().strip())
 
 # Cursor usage field names -> our canonical USAGE_KEYS. TODO(verify) against the
 # pinned cursor-agent version; the CLI JSON usage shape is not yet documented.
@@ -126,14 +137,14 @@ def _parse_tool_call(ev: Dict[str, Any]) -> Optional[Dict[str, Optional[str]]]:
         name = str(ev.get("name") or ev.get("tool") or "")
         parts = name.split("__")
         server = parts[1] if name.startswith("mcp__") and len(parts) >= 2 else None
-        return {"name": name, "server": server} if name else None
+        return {"name": name, "server": _normalize_server_name(server)} if name else None
     kind, payload = next(iter(tc.items()), (None, None))
     if kind == "mcpToolCall" and isinstance(payload, dict):
         args = payload.get("args") if isinstance(payload.get("args"), dict) else {}
         server = args.get("providerIdentifier") or args.get("serverIdentifier")
         tool = args.get("toolName")
         name = f"mcp__{server}__{tool}" if server and tool else str(args.get("name") or "")
-        return {"name": name, "server": server}
+        return {"name": name, "server": _normalize_server_name(server)}
     # Non-MCP built-in tool (read/edit/shell/etc.): keep the call, no MCP server.
     name = str(kind or ev.get("name") or "")
     return {"name": name, "server": None} if name else None

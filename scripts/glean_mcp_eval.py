@@ -418,12 +418,20 @@ def run_subprocess(cmd: List[str], cwd: Path, timeout: Optional[int] = None) -> 
             "duration_seconds": round(time.time() - started, 3),
         }
     except subprocess.TimeoutExpired as e:
+        # On timeout, TimeoutExpired.stdout/stderr can come back as bytes even
+        # when text=True, so decode before returning to keep the record str-typed.
+        def _as_text(v: Any) -> str:
+            if v is None:
+                return ""
+            if isinstance(v, bytes):
+                return v.decode("utf-8", errors="replace")
+            return v
         return {
             "cmd": cmd,
             "cwd": str(cwd),
             "returncode": 124,
-            "stdout": e.stdout or "",
-            "stderr": (e.stderr or "") + f"\nTimed out after {timeout}s",
+            "stdout": _as_text(e.stdout),
+            "stderr": _as_text(e.stderr) + f"\nTimed out after {timeout}s",
             "duration_seconds": round(time.time() - started, 3),
         }
 
@@ -1090,6 +1098,14 @@ def command_run(args: argparse.Namespace) -> int:
         "runs": [],
     }
     failures = 0
+    if not args.dry_run:
+        print(
+            f"▶ Running arm '{args.arm}' on host '{host}' | model={cfg.get('model')} "
+            f"| {len(prompts)} prompt(s) | timeout={cfg.get('run_timeout_seconds', 1800)}s "
+            f"| results -> {out_root}",
+            flush=True,
+        )
+    arm_started = time.time()
     for i, row in enumerate(prompts, 1):
         pid = safe_prompt_id(row["ID"])
         prompt_text = render_wrapper(wrapper, row)
@@ -1111,7 +1127,14 @@ def command_run(args: argparse.Namespace) -> int:
         }
         if not args.dry_run:
             write_json(run_dir / "metadata.json", metadata)
-        print(f"[{i}/{len(prompts)}] {args.arm} {pid}: running", flush=True)
+        dept = row.get("Dept", "")
+        preview = " ".join((row.get("Prompt") or "").split())[:80]
+        print(
+            f"[{i}/{len(prompts)}] {now_iso()} {args.arm}/{pid} "
+            f"({dept}): running… \"{preview}{'…' if len((row.get('Prompt') or '')) > 80 else ''}\"",
+            flush=True,
+        )
+        started = time.time()
         rec = run_claude_and_record(
             root,
             cfg,
@@ -1124,8 +1147,11 @@ def command_run(args: argparse.Namespace) -> int:
         )
         if args.dry_run:
             continue
+        elapsed = time.time() - started
         if not rec.get("success"):
             failures += 1
+        transcript = rec.get("transcript") or {}
+        servers = transcript.get("mcp_servers_used") or {}
         manifest["runs"].append({
             "id": row.get("ID"),
             "dir": str(run_dir),
@@ -1133,12 +1159,22 @@ def command_run(args: argparse.Namespace) -> int:
             "session_id": rec.get("session_id"),
             "total_tokens": rec.get("total_tokens"),
             "computed_cost_usd": rec.get("computed_cost_usd"),
-            "retrieval_attempted": (rec.get("transcript") or {}).get("retrieval_attempted"),
+            "retrieval_attempted": transcript.get("retrieval_attempted"),
         })
+        status = "✓" if rec.get("success") else "✗"
+        servers_str = ", ".join(f"{k}×{v}" for k, v in servers.items()) or "none"
         print(
-            f"[{i}/{len(prompts)}] {args.arm} {pid}: "
-            f"success={rec.get('success')} tokens={rec.get('total_tokens')} "
-            f"retrieval={(rec.get('transcript') or {}).get('retrieval_attempted')}",
+            f"[{i}/{len(prompts)}] {status} {args.arm}/{pid}: "
+            f"{elapsed:.1f}s | tokens={rec.get('total_tokens')} "
+            f"| tool_calls={transcript.get('tool_call_count')} "
+            f"| servers=[{servers_str}] "
+            f"| retrieval={transcript.get('retrieval_attempted')}",
+            flush=True,
+        )
+    if not args.dry_run:
+        print(
+            f"■ Arm '{args.arm}' finished in {time.time() - arm_started:.1f}s "
+            f"| {len(prompts) - failures}/{len(prompts)} succeeded",
             flush=True,
         )
     if args.dry_run:
