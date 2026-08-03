@@ -1016,6 +1016,21 @@ def command_preflight(args: argparse.Namespace) -> int:
     latest = results_dir(config_path, cfg) / "_preflight" / args.arm / "latest.json"
     write_json(latest, record)
     print(json.dumps({"preflight_path": str(out / "preflight.json"), **summary}, indent=2))
+    if overall_pass:
+        live_note = " (live tools verified)" if args.live else " (static only; add --live to verify tools)"
+        print(f"\n✅ PREFLIGHT PASSED — arm '{args.arm}' on host '{host}'{live_note}.", flush=True)
+    else:
+        reasons = []
+        if summary.get("missing_expected"):
+            reasons.append(f"missing expected servers {summary['missing_expected']}")
+        if summary.get("forbidden_found"):
+            reasons.append(f"forbidden servers present {summary['forbidden_found']}")
+        if summary.get("strict_config_errors"):
+            reasons.append(f"config errors {summary['strict_config_errors']}")
+        if live_pass is False:
+            reasons.append(f"live probe did not use required servers {missing_live_required}")
+        reason_str = "; ".join(reasons) or "see the JSON above"
+        print(f"\n❌ PREFLIGHT FAILED — arm '{args.arm}': {reason_str}.", flush=True)
     return 0 if overall_pass else 2
 
 
