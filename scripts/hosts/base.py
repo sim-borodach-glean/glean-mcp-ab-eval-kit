@@ -37,6 +37,11 @@ from typing import Any, Dict, List, Optional, Tuple
 REGISTRY: Dict[str, "HostAdapter"] = {}
 
 
+class HostSetupError(Exception):
+    """A fail-closed host lifecycle or state-verification error."""
+
+
+
 def register(adapter: "HostAdapter") -> None:
     REGISTRY[adapter.name] = adapter
 

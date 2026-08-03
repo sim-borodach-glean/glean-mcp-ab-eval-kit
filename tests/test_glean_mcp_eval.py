@@ -2,12 +2,14 @@ import json
 import tempfile
 import unittest
 import zipfile
+from unittest.mock import patch
 from pathlib import Path
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import glean_mcp_eval as gme  # noqa: E402
+from hosts import cursor as cursor_host  # noqa: E402
 
 
 class TranscriptParserTest(unittest.TestCase):
@@ -93,6 +95,52 @@ class ReportTest(unittest.TestCase):
             self.assertIn("## MCP usage by row", summary)
             csv_text = (root / "results" / "aggregate_rows.csv").read_text(encoding="utf-8")
             self.assertIn("Q1", csv_text)
+
+    def test_report_from_plugin_pair_uses_configured_arm_labels(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "golden_prompts.tsv").write_text("ID\\tDept\\tPrompt\\nQ1\\tEng\\tQuestion?\\n", encoding="utf-8")
+            cfg = {
+                "eval_name": "plugin-unit",
+                "prompts_file": "golden_prompts.tsv",
+                "results_dir": "results",
+                "comparison": {
+                    "treatment_arm": "treatment",
+                    "control_arm": "control",
+                    "treatment_label": "Glean plugin active",
+                    "control_label": "Glean plugin inactive",
+                    "subject_label": "plugin treatment",
+                },
+                "arms": {"treatment": {}, "control": {}},
+            }
+            cfg_path = root / "eval.config.json"
+            cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
+            for arm, tokens, route in [("treatment", 100, "plugin"), ("control", 120, "mcp")]:
+                d = root / "results" / "p1" / arm / "Q1"
+                d.mkdir(parents=True)
+                (d / "metadata.json").write_text(json.dumps({"id": "Q1", "dept": "Eng", "prompt": "Question?"}), encoding="utf-8")
+                (d / "answer.md").write_text(f"{arm} answer", encoding="utf-8")
+                run = {
+                    "success": True,
+                    "total_tokens": tokens,
+                    "computed_cost_usd": tokens / 1_000_000,
+                    "usage": {"input_tokens": tokens, "output_tokens": 0},
+                    "transcript": {
+                        "retrieval_attempted": True,
+                        "models": {"m": 1},
+                        "mcp_servers_used": {"plugin-glean-vnext-glean" if arm == "treatment" else "glean_default": 1},
+                        "routing_outcome": route,
+                    },
+                }
+                (d / "run.json").write_text(json.dumps(run), encoding="utf-8")
+            rc = gme.main(["report", "--config", str(cfg_path)])
+            self.assertEqual(rc, 0)
+            summary = (root / "results" / "aggregate_summary.md").read_text(encoding="utf-8")
+            self.assertIn("Glean plugin active", summary)
+            self.assertIn("Glean plugin inactive", summary)
+            csv_text = (root / "results" / "aggregate_rows.csv").read_text(encoding="utf-8")
+            self.assertIn("treatment_total_tokens", csv_text)
+            self.assertIn("plugin", csv_text)
 
     def test_report_negative_savings_wording_is_human_readable(self):
         self.assertEqual(gme.format_delta(-12.25), "12.2% higher for Glean")
@@ -213,6 +261,11 @@ class StrictMcpDiagnosticsTest(unittest.TestCase):
 
 
 class BlindGradingTest(unittest.TestCase):
+    def test_extended_grade_schema_contains_plugin_dimensions(self):
+        schema = gme.grade_schema(extended=True)
+        self.assertIn("accuracy_a", schema["properties"])
+        self.assertIn("workflow_fit_winner", schema["required"])
+
     def test_blind_assignment_deterministic(self):
         # Same inputs → same label every time (auditable / reproducible regrades).
         first = gme.blind_assignment("user01", "Q1")
@@ -302,6 +355,97 @@ class BootstrapTest(unittest.TestCase):
 
 
 class HostAdapterTest(unittest.TestCase):
+    def test_plugin_comparison_spec_and_pairing_defaults(self):
+        spec = gme.comparison_spec({
+            "arms": {
+                "treatment": {"label": "Plugin on"},
+                "control": {"label": "Plugin off"},
+            },
+            "comparison": {
+                "treatment_arm": "treatment",
+                "control_arm": "control",
+            },
+        })
+        self.assertEqual(spec["treatment_arm"], "treatment")
+        self.assertEqual(spec["control_arm"], "control")
+        self.assertFalse(spec["legacy"])
+
+    def test_cursor_plugin_dir_command_and_routing_harvest(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            plugin_dir = root / "glean-vnext"
+            (plugin_dir / ".cursor-plugin").mkdir(parents=True)
+            (plugin_dir / ".cursor-plugin" / "plugin.json").write_text(json.dumps({
+                "name": "glean-vnext", "version": "0.2.42"
+            }), encoding="utf-8")
+            cfg = {
+                "model": "sonnet-4",
+                "cursor_plugin": {
+                    "plugin_id": "glean-vnext",
+                    "server_identifier": "plugin-Glean vNext-glean",
+                    "activation_mode": "plugin-dir",
+                    "plugin_dir": str(plugin_dir),
+                    "manual_confirmation": False,
+                    "glean_mcp_server_identifiers": ["glean_default"],
+                },
+            }
+            arm = {
+                "plugin_state": "enabled",
+                "allowed_tools": ["mcp__plugin-glean-vnext-glean__find_skills"],
+            }
+            adapter = cursor_host.CursorAdapter()
+            cmd, ctx = adapter.build_command(root, cfg, arm, "hi", root / "out")
+            self.assertIn("--plugin-dir", cmd)
+            self.assertIn(str(plugin_dir), cmd)
+            self.assertIn("Mcp(plugin-Glean vNext-glean:find_skills)", ctx["permissions"]["allow"])
+            stdout = "\n".join([
+                json.dumps({
+                    "type": "tool_call", "call_id": "1",
+                    "tool_call": {"mcpToolCall": {"args": {
+                        "providerIdentifier": "plugin-Glean vNext-glean", "toolName": "find_skills"
+                    }}},
+                }),
+                json.dumps({
+                    "type": "tool_call", "call_id": "2",
+                    "tool_call": {"mcpToolCall": {"args": {
+                        "providerIdentifier": "glean_default", "toolName": "search"
+                    }}},
+                }),
+                json.dumps({"type": "result", "result": "ok", "duration_ms": 12}),
+            ])
+            harvested = adapter.harvest(
+                {"stdout": stdout, "returncode": 0}, root, root / "out", cfg, ctx
+            )
+            transcript = harvested["transcript"]
+            self.assertEqual(transcript["routing_outcome"], "mixed")
+            self.assertEqual(transcript["plugin_tool_call_count"], 1)
+            self.assertTrue(transcript["routing_confounded"])
+
+    def test_manual_plugin_checkpoint_fails_closed_without_retry(self):
+        class NonInteractive:
+            def isatty(self):
+                return False
+
+        with patch.object(cursor_host.sys, "stdin", NonInteractive()):
+            with self.assertRaises(cursor_host.HostSetupError):
+                cursor_host._manual_plugin_checkpoint(
+                    "control", "disabled", {"disable_instruction": "uninstall the plugin"}
+                )
+
+    def test_cursor_control_command_does_not_load_plugin_dir(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            cfg = {
+                "cursor_plugin": {
+                    "plugin_id": "glean-vnext",
+                    "activation_mode": "plugin-dir",
+                    "plugin_dir": str(root / "plugin"),
+                }
+            }
+            arm = {"plugin_state": "disabled"}
+            cmd, _ctx = cursor_host.CursorAdapter().build_command(root, cfg, arm, "hi", root / "out")
+            self.assertNotIn("--plugin-dir", cmd)
+
     def test_registry_has_both_hosts(self):
         self.assertEqual(gme.get_adapter("claude-code").name, "claude-code")
         self.assertEqual(gme.get_adapter("cursor").name, "cursor")

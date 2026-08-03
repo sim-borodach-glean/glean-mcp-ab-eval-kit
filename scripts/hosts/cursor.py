@@ -1,8 +1,10 @@
-"""Cursor host adapter (SKELETON).
+"""Cursor host adapter.
 
 Runs one prompt headless via Cursor's `cursor-agent` CLI and harvests per-run
-metrics. The design is settled; the spots that need a live Cursor to confirm are
-marked `TODO(verify)`. See docs/hosts/cursor.md.
+metrics. It also supports the Cursor Glean plugin variant: treatment can load a
+verified plugin directory, control can require a manual deactivate/uninstall
+checkpoint, and stream-json routing evidence is recorded. See
+`docs/hosts/cursor.md` and `docs/hosts/cursor-glean-plugin.md`.
 
 Key differences from Claude Code (from Cursor docs, 2026-07):
   - Command: `cursor-agent -p "<prompt>" --output-format stream-json --force --trust`.
@@ -21,13 +23,15 @@ Key differences from Claude Code (from Cursor docs, 2026-07):
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .base import HostAdapter, register
+from .base import HostAdapter, HostSetupError, register
 
 
 def _cursor_bin() -> str:
@@ -71,7 +75,104 @@ def _normalize_server_name(name: Optional[str]) -> Optional[str]:
     that would otherwise never match a normalized config entry."""
     if not name:
         return name
-    return re.sub(r"[^a-z0-9_-]+", "", name.lower().strip())
+    # Cursor plugin identifiers may contain spaces (for example
+    # "plugin-Glean vNext-glean"); preserve word boundaries so they match the
+    # configured canonical identifier "plugin-glean-vnext-glean".
+    return re.sub(r"[^a-z0-9_-]+", "-", name.lower().strip()).strip("-")
+
+
+def _plugin_settings(cfg: Dict[str, Any], arm_cfg: Dict[str, Any]) -> Dict[str, Any]:
+    settings = dict(cfg.get("cursor_plugin") or {})
+    settings.update(arm_cfg.get("cursor_plugin") or {})
+    return settings
+
+
+def _plugin_state(arm_cfg: Dict[str, Any], settings: Dict[str, Any]) -> Optional[str]:
+    state = arm_cfg.get("plugin_state")
+    if state is None:
+        state = settings.get("required_state")
+    if state is None:
+        return None
+    state = str(state).strip().lower()
+    if state not in {"enabled", "disabled"}:
+        raise HostSetupError(f"Cursor plugin_state must be 'enabled' or 'disabled', got {state!r}")
+    return state
+
+
+def _plugin_manifest(path: Path) -> Dict[str, Any]:
+    manifest = path / ".cursor-plugin" / "plugin.json"
+    if not manifest.exists():
+        return {}
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _discover_plugin_dir(settings: Dict[str, Any]) -> Optional[Path]:
+    """Find an installed Cursor plugin without touching activation state."""
+    configured = settings.get("plugin_dir")
+    env_name = settings.get("plugin_dir_env")
+    if not configured and env_name:
+        configured = os.environ.get(str(env_name))
+    if configured:
+        path = Path(os.path.expandvars(os.path.expanduser(str(configured))))
+        return path if path.is_dir() else None
+    if not settings.get("auto_discover", False):
+        return None
+    wanted = str(settings.get("plugin_id") or settings.get("id") or "").strip().lower()
+    cache_root = Path.home() / ".cursor" / "plugins" / "cache"
+    candidates: List[Tuple[Tuple[int, ...], float, Path]] = []
+    if not cache_root.exists():
+        return None
+    for manifest_path in cache_root.glob("**/.cursor-plugin/plugin.json"):
+        plugin_dir = manifest_path.parent.parent
+        manifest = _plugin_manifest(plugin_dir)
+        name = str(manifest.get("name") or "").lower()
+        if wanted and name != wanted:
+            continue
+        version = tuple(int(x) for x in re.findall(r"\d+", str(manifest.get("version") or "0")))
+        candidates.append((version, manifest_path.stat().st_mtime, plugin_dir))
+    if not candidates:
+        return None
+    return sorted(candidates, key=lambda item: (item[0], item[1]), reverse=True)[0][2]
+
+
+def _plugin_server_ids(settings: Dict[str, Any]) -> set:
+    values = settings.get("server_identifiers") or settings.get("server_identifier") or []
+    if isinstance(values, str):
+        values = [values]
+    return {_normalize_server_name(str(value)) for value in values if value}
+
+
+def _manual_plugin_checkpoint(arm_name: str, state: str, settings: Dict[str, Any]) -> None:
+    if not settings.get("manual_confirmation", True):
+        return
+    action = settings.get("enable_instruction") if state == "enabled" else settings.get("disable_instruction")
+    if not action:
+        action = (
+            "install/enable the Cursor plugin"
+            if state == "enabled"
+            else "deactivate or uninstall the Cursor plugin"
+        )
+    expected = "PLUGIN_ON" if state == "enabled" else "PLUGIN_OFF"
+    print(
+        f"\n⚠ Cursor plugin checkpoint for arm '{arm_name}': {action}.\n"
+        f"When the application is ready, type {expected} and press Enter. "
+        "The evaluator will not retry or toggle the plugin in a loop.",
+        flush=True,
+    )
+    if not sys.stdin.isatty():
+        raise HostSetupError(
+            f"Arm '{arm_name}' requires manual Cursor plugin state '{state}', but stdin is not interactive. "
+            f"{action.capitalize()}, then rerun this command from a terminal and type {expected}."
+        )
+    response = input(f"Confirm {expected}: ").strip().upper()
+    if response != expected:
+        raise HostSetupError(
+            f"Plugin checkpoint cancelled for arm '{arm_name}'. Expected {expected}; no run was started."
+        )
 
 # Cursor usage field names -> our canonical USAGE_KEYS. TODO(verify) against the
 # pinned cursor-agent version; the CLI JSON usage shape is not yet documented.
@@ -107,7 +208,10 @@ def _load_arm_servers(root: Path, arm_cfg: Dict[str, Any]) -> Dict[str, Any]:
     return servers if isinstance(servers, dict) else {}
 
 
-def _permissions_from_arm(arm_cfg: Dict[str, Any]) -> Dict[str, List[str]]:
+def _permissions_from_arm(
+    arm_cfg: Dict[str, Any],
+    plugin_settings: Optional[Dict[str, Any]] = None,
+) -> Dict[str, List[str]]:
     """Translate the kit's allowed_tools/disallowed_tools into a Cursor
     `.cursor/cli.json` permissions block. Deny wins over allow.
 
@@ -116,11 +220,21 @@ def _permissions_from_arm(arm_cfg: Dict[str, Any]) -> Dict[str, List[str]]:
     translate `mcp__<server>__<tool>` -> `Mcp(<server>:<tool>)` and always deny
     Write/Shell for a read-only eval.
     """
+    plugin_settings = plugin_settings or {}
+    plugin_ids = _plugin_server_ids(plugin_settings)
+    plugin_raw_id = str(plugin_settings.get("server_identifier") or "").strip()
+
     def to_rule(tool: str) -> Optional[str]:
         if tool.startswith("mcp__"):
             parts = tool.split("__")
             if len(parts) >= 3:
-                return f"Mcp({parts[1]}:{parts[2]})"
+                server = parts[1]
+                if plugin_raw_id and _normalize_server_name(server) in plugin_ids:
+                    # Cursor may expose a plugin server with spaces/case in
+                    # runtime events. Permission rules must use that raw name,
+                    # while observed metrics use the normalized name.
+                    server = plugin_raw_id
+                return f"Mcp({server}:{parts[2]})"
             if len(parts) == 2:
                 return f"Mcp({parts[1]}:*)"
         return tool  # pass through non-mcp rules verbatim
@@ -218,6 +332,17 @@ class CursorAdapter(HostAdapter):
             "--approve-mcps",                  # load the (arm-only) MCP servers without interactive approval
             "--workspace", str(ws),
         ]
+        settings = _plugin_settings(cfg, arm_cfg)
+        required_plugin_state = _plugin_state(arm_cfg, settings)
+        plugin_dir = None
+        if required_plugin_state == "enabled" and str(settings.get("activation_mode", "manual")) == "plugin-dir":
+            plugin_dir = _discover_plugin_dir(settings)
+            if plugin_dir is None:
+                raise HostSetupError(
+                    "Glean Cursor plugin is required for this arm, but no plugin directory was found. "
+                    f"Set {settings.get('plugin_dir_env', 'cursor_plugin.plugin_dir')} or install the plugin, then rerun."
+                )
+            cmd.extend(["--plugin-dir", str(plugin_dir)])
         model = cfg.get(model_key) or cfg.get("model")
         if model:
             cmd.extend(["--model", str(model)])
@@ -230,8 +355,12 @@ class CursorAdapter(HostAdapter):
             "cwd": str(ws),
             "ws": str(ws),
             "servers": _load_arm_servers(root, arm_cfg),
-            "permissions": _permissions_from_arm(arm_cfg),
+            "permissions": _permissions_from_arm(arm_cfg, settings),
             "raw_output_path": str(out_dir / "cursor_output.json"),
+            "plugin_state": required_plugin_state,
+            "plugin_server_ids": sorted(_plugin_server_ids(settings)),
+            "plugin_dir": str(plugin_dir) if plugin_dir else None,
+            "plugin_settings": settings,
         }
         return cmd, ctx
 
@@ -261,6 +390,10 @@ class CursorAdapter(HostAdapter):
     _GLOBAL_MCP = Path.home() / ".cursor" / "mcp.json"
     _mcp_managed: bool = False
     _mcp_backup: Optional[str] = None
+    # Reuse one manual confirmation across preflight + run when `run-all` or
+    # `smoke-test` invokes both in the same process. A separate CLI invocation
+    # asks again, which is intentional because Desktop state may have changed.
+    _plugin_checkpoints: Dict[Tuple[str, str], bool] = {}
 
     def _arm_server_ids(self, arm_cfg: Dict[str, Any]) -> List[str]:
         """Server identifiers this arm needs, in the exact case cursor-agent
@@ -275,6 +408,41 @@ class CursorAdapter(HostAdapter):
         return ids
 
     def setup_arm(self, root: Path, cfg: Dict[str, Any], arm_cfg: Dict[str, Any], arm_name: str) -> None:
+        settings = _plugin_settings(cfg, arm_cfg)
+        required_plugin_state = _plugin_state(arm_cfg, settings)
+        if required_plugin_state:
+            activation_mode = str(settings.get("activation_mode", "manual"))
+            if required_plugin_state == "enabled" and activation_mode == "plugin-dir":
+                plugin_dir = _discover_plugin_dir(settings)
+                if plugin_dir is None:
+                    raise HostSetupError(
+                        "Glean Cursor plugin is required but its local plugin directory could not be found. "
+                        f"Install it or set {settings.get('plugin_dir_env', 'CURSOR_GLEAN_PLUGIN_DIR')}, then rerun."
+                    )
+                manifest = _plugin_manifest(plugin_dir)
+                expected_version = str(settings.get("version") or "").strip()
+                actual_version = str(manifest.get("version") or "").strip()
+                if expected_version and actual_version != expected_version:
+                    raise HostSetupError(
+                        f"Cursor plugin version mismatch: config expects {expected_version}, "
+                        f"but discovered {actual_version or 'unknown'} at {plugin_dir}. "
+                        "Update the config or install the expected plugin version."
+                    )
+                print(
+                    f"✓ Cursor plugin ready for '{arm_name}': {manifest.get('name', 'unknown')} "
+                    f"{actual_version or 'unknown'} at {plugin_dir}",
+                    flush=True,
+                )
+            else:
+                checkpoint_key = (arm_name, required_plugin_state)
+                if self._plugin_checkpoints.get(checkpoint_key):
+                    print(
+                        f"✓ Reusing confirmed Cursor plugin state '{required_plugin_state}' for arm '{arm_name}'.",
+                        flush=True,
+                    )
+                else:
+                    _manual_plugin_checkpoint(arm_name, required_plugin_state, settings)
+                    self._plugin_checkpoints[checkpoint_key] = True
         if not cfg.get("cursor_manage_global_mcp", True):
             return
         keep = self._arm_server_ids(arm_cfg)
@@ -355,6 +523,7 @@ class CursorAdapter(HostAdapter):
                 continue
 
         raw_path = ctx.get("raw_output_path") or str(out_dir / "cursor_output.json")
+        Path(raw_path).parent.mkdir(parents=True, exist_ok=True)
         Path(raw_path).write_text(json.dumps(events, indent=2), encoding="utf-8")
 
         model = None
@@ -397,6 +566,37 @@ class CursorAdapter(HostAdapter):
             if tc.get("server"):
                 mcp_servers_used[tc["server"]] = mcp_servers_used.get(tc["server"], 0) + 1
 
+        plugin_server_ids = set(ctx.get("plugin_server_ids") or [])
+        plugin_calls = [
+            tc for tc in tool_calls
+            if tc.get("server") in plugin_server_ids
+            or str(tc.get("name") or "").lower().endswith("__glean_run")
+        ]
+        plugin_servers_used: Dict[str, int] = {}
+        for tc in plugin_calls:
+            server = tc.get("server") or "plugin_skill"
+            plugin_servers_used[server] = plugin_servers_used.get(server, 0) + 1
+        glean_mcp_ids = {
+            _normalize_server_name(str(value))
+            for value in (ctx.get("plugin_settings") or {}).get(
+                "glean_mcp_server_identifiers", ["glean_default", "glean"]
+            )
+            if value
+        }
+        plugin_observed = bool(plugin_calls)
+        glean_mcp_observed = any(server in glean_mcp_ids for server in mcp_servers_used)
+        if plugin_observed and glean_mcp_observed:
+            routing_outcome = "mixed"
+        elif plugin_observed:
+            routing_outcome = "plugin"
+        elif glean_mcp_observed:
+            routing_outcome = "mcp"
+        elif mcp_servers_used:
+            routing_outcome = "other_mcp"
+        else:
+            routing_outcome = "none"
+        required_plugin_state = ctx.get("plugin_state")
+
         transcript = {
             "found": bool(events),
             "usage": usage,
@@ -406,6 +606,16 @@ class CursorAdapter(HostAdapter):
             "tool_call_count": len(tool_calls),
             "mcp_tool_call_count": sum(1 for tc in tool_calls if tc.get("server")),
             "mcp_servers_used": mcp_servers_used,
+            "plugin_tool_call_count": len(plugin_calls),
+            "plugin_servers_used": plugin_servers_used,
+            "plugin_tool_names": sorted(str(tc.get("name") or "") for tc in plugin_calls),
+            "plugin_state_expected": required_plugin_state,
+            "plugin_present_when_disabled": required_plugin_state == "disabled" and plugin_observed,
+            "plugin_required_but_unobserved": required_plugin_state == "enabled"
+            and bool((ctx.get("plugin_settings") or {}).get("require_plugin_route", False))
+            and not plugin_observed,
+            "routing_outcome": routing_outcome,
+            "routing_confounded": routing_outcome == "mixed",
             "retrieval_attempted": bool(tool_calls),
             "errors": [] if events else ["no stream-json events parsed"],
         }
@@ -425,13 +635,23 @@ class CursorAdapter(HostAdapter):
 
     def doctor(self, root: Path) -> Dict[str, Any]:
         present = self.executable_present()
+        plugin_dir = _discover_plugin_dir({"plugin_id": "glean-vnext", "auto_discover": True})
+        manifest = _plugin_manifest(plugin_dir) if plugin_dir else {}
         return {
             "cursor_agent_on_path": shutil.which("cursor-agent"),
             "caps": self.caps,
+            "plugin_inventory": {
+                "plugin_id": manifest.get("name") if manifest else "glean-vnext",
+                "version": manifest.get("version") if manifest else None,
+                "path": str(plugin_dir) if plugin_dir else None,
+                "installed": bool(plugin_dir),
+                "note": "Installed is not the same as active; live preflight checks runtime routing.",
+            },
             "notes": [
                 "Cursor does not expose per-run $ cost; list-price-normalized cost is used.",
                 "TODO(verify): confirm token usage appears in stream-json on your cursor-agent version.",
                 "Run the judge on a structured-output host via config 'judge_host' (default claude-code).",
+                "Plugin arms fail closed on a missing manual checkpoint and never auto-uninstall or retry indefinitely.",
             ] if present else ["cursor-agent not found on PATH"],
         }
 

@@ -74,7 +74,7 @@ Claude Code is the reference host because it supports:
 - transcript-derived usage and cost
 - structured judge output
 
-Cursor support exists as a secondary adapter, but the examples and customer quickstart below target Claude Code.
+Cursor support exists as a secondary adapter. The original Cursor Glean-MCP-vs-direct-MCP runbook is in [`docs/hosts/cursor.md`](docs/hosts/cursor.md); the separate Glean Cursor plugin comparison is in [`docs/hosts/cursor-glean-plugin.md`](docs/hosts/cursor-glean-plugin.md), with its [experiment brief](docs/CURSOR_GLEAN_PLUGIN_EXPERIMENT_BRIEF.md), [customer message](docs/CURSOR_GLEAN_PLUGIN_CUSTOMER_MESSAGE.md), [scoring sheet](docs/CURSOR_GLEAN_PLUGIN_SCORING_SHEET.md), and [readout template](docs/CURSOR_GLEAN_PLUGIN_READOUT_TEMPLATE.md).
 
 ## Quickstart for an operator
 

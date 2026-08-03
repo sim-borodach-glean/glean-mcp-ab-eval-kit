@@ -1,0 +1,27 @@
+{
+  "_comment": "Shared Cursor MCP environment for the Glean plugin experiment. Use the same file for both arms. Replace placeholders and copy the exact canonical server entries from ~/.cursor/mcp.json where necessary; do not commit credentials.",
+  "mcpServers": {
+    "glean_default": {
+      "type": "http",
+      "url": "https://<your-glean-subdomain>-be.glean.com/mcp/default"
+    },
+    "Atlassian-MCP-Server": {
+      "type": "http",
+      "url": "https://mcp.atlassian.com/v1/mcp"
+    },
+    "slack": {
+      "type": "http",
+      "url": "https://mcp.slack.com/mcp"
+    },
+    "github": {
+      "_comment": "Copy the customer's exact github entry from ~/.cursor/mcp.json, including its URL/auth mechanism.",
+      "type": "http",
+      "url": "<copy-customer-github-url>"
+    },
+    "google_drive": {
+      "_comment": "Copy the customer's exact google_drive entry from ~/.cursor/mcp.json, including its URL/auth mechanism.",
+      "type": "http",
+      "url": "<copy-customer-google-drive-url>"
+    }
+  }
+}

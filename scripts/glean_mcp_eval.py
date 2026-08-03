@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Glean MCP A/B Eval Kit.
 
-Dependency-free CLI for running a crossover evaluation of Glean MCP vs direct
-vendor MCPs in Claude Code.
+Dependency-free CLI for running crossover evaluations of Glean MCP vs direct
+vendor MCPs, plus configured host/plugin variants such as Cursor Glean plugin
+active vs inactive.
 """
 
 from __future__ import annotations
@@ -28,7 +29,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from hosts.base import HostAdapter, get_adapter, register
+from hosts.base import HostAdapter, HostSetupError, get_adapter, register
 from hosts import cursor as _cursor  # noqa: F401  importing registers the "cursor" adapter
 
 USAGE_KEYS = (
@@ -327,8 +328,48 @@ def arm_config(cfg: Dict[str, Any], arm: str) -> Dict[str, Any]:
     return arms[arm]
 
 
+def comparison_spec(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the configured treatment/control pair.
+
+    Existing configs default to the historical Glean-vs-direct pair. New
+    variants can name their arms explicitly, e.g. treatment/control for the
+    Cursor plugin experiment, without changing the result layout semantics.
+    """
+    arms = cfg.get("arms") or {}
+    comparison = cfg.get("comparison") or {}
+    treatment = str(comparison.get("treatment_arm") or ("glean" if "glean" in arms else "treatment"))
+    control = str(comparison.get("control_arm") or ("direct" if "direct" in arms else "control"))
+    if treatment not in arms or control not in arms or treatment == control:
+        raise EvalError(
+            "Config must define distinct comparison arms. Set comparison.treatment_arm and "
+            "comparison.control_arm, or provide the legacy glean and direct arms."
+        )
+    treatment_cfg = arms[treatment]
+    control_cfg = arms[control]
+    return {
+        "treatment_arm": treatment,
+        "control_arm": control,
+        "treatment_cfg": treatment_cfg,
+        "control_cfg": control_cfg,
+        "treatment_label": str(comparison.get("treatment_label") or treatment_cfg.get("label") or treatment),
+        "control_label": str(comparison.get("control_label") or control_cfg.get("label") or control),
+        "subject_label": str(comparison.get("subject_label") or ("Glean" if treatment == "glean" else "treatment")),
+        "legacy": treatment == "glean" and control == "direct",
+    }
+
+
+def plugin_config(cfg: Dict[str, Any], arm_cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge global Cursor plugin settings with per-arm overrides."""
+    merged = dict(cfg.get("cursor_plugin") or {})
+    merged.update(arm_cfg.get("cursor_plugin") or {})
+    return merged
+
+
 def normalize_server_name(name: str) -> str:
-    return re.sub(r"[^a-z0-9_-]+", "", name.lower().strip())
+    # Cursor plugin identifiers may contain spaces (for example
+    # "plugin-Glean vNext-glean"); preserve word boundaries so they match the
+    # configured canonical identifier "plugin-glean-vnext-glean".
+    return re.sub(r"[^a-z0-9_-]+", "-", name.lower().strip()).strip("-")
 
 
 def recursively_find_mcp_servers(obj: Any, out: Counter) -> None:
@@ -958,12 +999,14 @@ def command_preflight(args: argparse.Namespace) -> int:
     static = validate_static_setup(root, cfg, args.arm)
     live_record = None
     live_pass = None
+    plugin_live_flags: List[str] = []
+    plugin_observed = False
     if args.live:
         prompt = acfg.get("preflight_prompt") or f"Use the {args.arm} retrieval tools once and report whether setup works."
         adapter = get_adapter(host)
-        if not args.dry_run:
-            adapter.setup_arm(root, cfg, acfg, args.arm)
         try:
+            if not args.dry_run:
+                adapter.setup_arm(root, cfg, acfg, args.arm)
             live_record = run_claude_and_record(
                 root,
                 cfg,
@@ -977,14 +1020,35 @@ def command_preflight(args: argparse.Namespace) -> int:
             )
         finally:
             if not args.dry_run:
+                # Teardown is unconditional so a failed plugin checkpoint or
+                # partial MCP swap cannot leave global state stranded.
                 adapter.teardown_arm(root, cfg, acfg, args.arm)
-        observed = set((live_record.get("transcript") or {}).get("mcp_servers_used", {}).keys())
+        live_transcript = live_record.get("transcript") or {}
+        observed = set(live_transcript.get("mcp_servers_used", {}).keys())
         required = set(normalize_server_name(x) for x in acfg.get("require_live_tool_servers", acfg.get("expected_mcp_servers", [])))
         missing_live_required = sorted(required - observed)
+        settings = plugin_config(cfg, acfg)
+        required_plugin_state = acfg.get("plugin_state") or settings.get("required_state")
+        plugin_id_values = settings.get("server_identifiers") or settings.get("server_identifier") or []
+        if isinstance(plugin_id_values, str):
+            plugin_id_values = [plugin_id_values]
+        plugin_ids = {normalize_server_name(str(x)) for x in plugin_id_values if x}
+        plugin_observed = bool(live_transcript.get("plugin_servers_used")) or bool(
+            plugin_ids & set(observed)
+        )
+        if required_plugin_state == "disabled" and plugin_observed:
+            plugin_live_flags.append("plugin_present_when_disabled")
+        if (
+            required_plugin_state == "enabled"
+            and settings.get("require_plugin_server_in_preflight", settings.get("require_plugin_server", False))
+            and not plugin_observed
+        ):
+            plugin_live_flags.append("plugin_server_not_observed")
         # For live preflight, require successful run and tool use from every required/expected server.
-        live_pass = bool(live_record.get("success")) and (not required or not missing_live_required)
+        live_pass = bool(live_record.get("success")) and (not required or not missing_live_required) and not plugin_live_flags
     else:
         missing_live_required = []
+
     overall_pass = bool(static.get("static_pass")) and (live_pass is not False)
     record = {
         "created_at": now_iso(),
@@ -995,6 +1059,8 @@ def command_preflight(args: argparse.Namespace) -> int:
         "live_enabled": bool(args.live),
         "live_pass": live_pass,
         "live_missing_required_servers": missing_live_required,
+        "plugin_observed": plugin_observed,
+        "plugin_live_flags": plugin_live_flags,
         "live_record": live_record,
         "pass": overall_pass,
     }
@@ -1008,6 +1074,8 @@ def command_preflight(args: argparse.Namespace) -> int:
         "strict_config_warnings": (static.get("strict_config_diagnostics") or {}).get("warnings", []),
         "live_pass": live_pass,
         "live_missing_required_servers": missing_live_required,
+        "plugin_observed": plugin_observed,
+        "plugin_live_flags": plugin_live_flags,
     }
     if args.dry_run:
         print(json.dumps({"dry_run": True, "arm": args.arm, **summary}, indent=2))
@@ -1029,6 +1097,8 @@ def command_preflight(args: argparse.Namespace) -> int:
             reasons.append(f"config errors {summary['strict_config_errors']}")
         if live_pass is False:
             reasons.append(f"live probe did not use required servers {missing_live_required}")
+        if plugin_live_flags:
+            reasons.append(f"plugin state check failed {plugin_live_flags}")
         reason_str = "; ".join(reasons) or "see the JSON above"
         print(f"\n❌ PREFLIGHT FAILED — arm '{args.arm}': {reason_str}.", flush=True)
     return 0 if overall_pass else 2
@@ -1081,6 +1151,8 @@ def require_passing_preflight(config_path: Path, cfg: Dict[str, Any], arm: str) 
             reasons.append("live preflight failed")
         if rec.get("live_missing_required_servers"):
             reasons.append(f"live preflight did not use required servers: {rec.get('live_missing_required_servers')}")
+        if rec.get("plugin_live_flags"):
+            reasons.append(f"plugin state check failed: {rec.get('plugin_live_flags')}")
         reason_text = "; ".join(reasons) if reasons else "preflight pass=false"
         raise EvalError(
             f"Cannot run arm {arm!r}: latest preflight failed ({reason_text}). "
@@ -1111,26 +1183,32 @@ def command_run(args: argparse.Namespace) -> int:
         require_passing_preflight(config_path, cfg, args.arm)
     out_root = results_dir(config_path, cfg) / args.participant_id / args.arm
     wrapper = cfg.get("prompt_wrapper") or "{prompt}"
+    settings = plugin_config(cfg, acfg)
     manifest = {
         "eval_name": cfg.get("eval_name"),
         "participant_id": args.participant_id,
         "arm": args.arm,
+        "plugin_state_expected": acfg.get("plugin_state") or settings.get("required_state"),
+        "plugin_id": settings.get("plugin_id") or settings.get("id"),
+        "plugin_version_expected": settings.get("version"),
         "started_at": now_iso(),
         "prompt_count": len(prompts),
         "runs": [],
     }
     failures = 0
     adapter = get_adapter(host)
-    if not args.dry_run:
+    arm_started = time.time()
+    try:
+      if not args.dry_run:
         print(
             f"▶ Running arm '{args.arm}' on host '{host}' | model={cfg.get('model')} "
             f"| {len(prompts)} prompt(s) | timeout={cfg.get('run_timeout_seconds', 1800)}s "
             f"| results -> {out_root}",
             flush=True,
         )
+        # This is inside the finally-protected block so a failed plugin
+        # checkpoint or partial global MCP swap is always torn down.
         adapter.setup_arm(root, cfg, acfg, args.arm)
-    arm_started = time.time()
-    try:
       for i, row in enumerate(prompts, 1):
         pid = safe_prompt_id(row["ID"])
         prompt_text = render_wrapper(wrapper, row)
@@ -1185,6 +1263,8 @@ def command_run(args: argparse.Namespace) -> int:
             "total_tokens": rec.get("total_tokens"),
             "computed_cost_usd": rec.get("computed_cost_usd"),
             "retrieval_attempted": transcript.get("retrieval_attempted"),
+            "routing_outcome": transcript.get("routing_outcome"),
+            "plugin_servers_used": transcript.get("plugin_servers_used"),
         })
         status = "✓" if rec.get("success") else "✗"
         servers_str = ", ".join(f"{k}×{v}" for k, v in servers.items()) or "none"
@@ -1223,13 +1303,16 @@ def command_smoke_test(args: argparse.Namespace) -> int:
     prompt_ids = [safe_prompt_id(row["ID"]) for row in prompts[:args.prompt_count]]
     if len(prompt_ids) < args.prompt_count:
         raise EvalError(f"Only {len(prompt_ids)} prompts are available; cannot run a {args.prompt_count}-prompt smoke test")
-    arms = [args.arm] if args.arm != "both" else ["glean", "direct"]
+    spec = comparison_spec(cfg)
+    arms = [args.arm] if args.arm != "both" else [spec["treatment_arm"], spec["control_arm"]]
+    # Run each arm's preflight immediately before its prompts. This is
+    # important for plugin variants because the tester may need to deactivate
+    # the plugin between treatment and control.
     for arm in arms:
         preflight_args = argparse.Namespace(config=args.config, host=args.host, arm=arm, live=True, dry_run=args.dry_run)
         rc = command_preflight(preflight_args)
         if rc != 0:
             return rc
-    for arm in arms:
         run_args = argparse.Namespace(
             config=args.config, host=args.host, arm=arm, participant_id=args.participant_id,
             dry_run=args.dry_run, force=args.force, prompt_ids=prompt_ids, rerun_existing=args.rerun_existing,
@@ -1249,14 +1332,18 @@ def command_run_cli(args: argparse.Namespace) -> int:
 def command_run_all(args: argparse.Namespace) -> int:
     """Run both arms, then grade, report, and optionally package."""
     config_path, cfg = load_config(args.config)
-    arms = list((cfg.get("arms") or {}).keys())
-    if not {"glean", "direct"}.issubset(arms):
-        raise EvalError("run-all requires both glean and direct arms in the config")
+    spec = comparison_spec(cfg)
+    treatment_arm = spec["treatment_arm"]
+    control_arm = spec["control_arm"]
     if args.dry_run:
         print(json.dumps({
             "dry_run": True,
             "participant_id": args.participant_id,
-            "steps": ["preflight glean", "preflight direct", "run glean", "run direct", "grade", "report", "package" if not args.no_package else "skip package"],
+            "steps": [
+                f"preflight {treatment_arm}", f"run {treatment_arm}",
+                f"preflight {control_arm}", f"run {control_arm}",
+                "grade", "report", "package" if not args.no_package else "skip package",
+            ],
         }, indent=2))
         return 0
     if args.smoke:
@@ -1265,7 +1352,11 @@ def command_run_all(args: argparse.Namespace) -> int:
             prompt_count=3, dry_run=args.dry_run, force=args.force, rerun_existing=args.rerun_existing,
         )
         return command_smoke_test(smoke_args)
-    for arm in ("glean", "direct"):
+    for arm in (treatment_arm, control_arm):
+        preflight_args = argparse.Namespace(config=args.config, host=args.host, arm=arm, live=True, dry_run=False)
+        rc = command_preflight(preflight_args)
+        if rc != 0:
+            return rc
         run_args = argparse.Namespace(
             config=args.config, host=args.host, arm=arm, participant_id=args.participant_id,
             dry_run=args.dry_run, force=args.force, prompt_ids=[], rerun_existing=args.rerun_existing,
@@ -1288,73 +1379,101 @@ def command_run_all(args: argparse.Namespace) -> int:
     return 0
 
 
-def grade_schema() -> Dict[str, Any]:
+def grade_schema(extended: bool = False) -> Dict[str, Any]:
     # Blind schema: the judge sees "Answer A" / "Answer B" and is never told which
-    # arm is Glean. Results are de-blinded back to glean/direct after grading.
+    # arm is treatment/control. Results are de-blinded after grading.
+    properties: Dict[str, Any] = {
+        "winner": {"type": "string", "enum": ["A", "B", "tie"]},
+        "completeness_winner": {"type": "string", "enum": ["A", "B", "tie"]},
+        "groundedness_winner": {"type": "string", "enum": ["A", "B", "tie"]},
+        "usefulness_winner": {"type": "string", "enum": ["A", "B", "tie"]},
+        "efficiency_winner": {"type": "string", "enum": ["A", "B", "tie"]},
+        "completeness_a": {"type": "number", "minimum": 1, "maximum": 5},
+        "completeness_b": {"type": "number", "minimum": 1, "maximum": 5},
+        "groundedness_a": {"type": "number", "minimum": 1, "maximum": 5},
+        "groundedness_b": {"type": "number", "minimum": 1, "maximum": 5},
+        "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+        "reasoning": {"type": "string"},
+        "watchouts": {"type": "array", "items": {"type": "string"}},
+    }
+    required = [
+        "winner",
+        "completeness_winner",
+        "groundedness_winner",
+        "usefulness_winner",
+        "efficiency_winner",
+        "completeness_a",
+        "completeness_b",
+        "groundedness_a",
+        "groundedness_b",
+        "confidence",
+        "reasoning",
+        "watchouts",
+    ]
+    if extended:
+        for dimension in (
+            "accuracy",
+            "source_coverage",
+            "citation_usefulness",
+            "freshness",
+            "instruction_following",
+            "workflow_fit",
+        ):
+            properties[f"{dimension}_winner"] = {"type": "string", "enum": ["A", "B", "tie"]}
+            properties[f"{dimension}_a"] = {"type": "number", "minimum": 1, "maximum": 5}
+            properties[f"{dimension}_b"] = {"type": "number", "minimum": 1, "maximum": 5}
+            required.extend([f"{dimension}_winner", f"{dimension}_a", f"{dimension}_b"])
     return {
         "type": "object",
-        "properties": {
-            "winner": {"type": "string", "enum": ["A", "B", "tie"]},
-            "completeness_winner": {"type": "string", "enum": ["A", "B", "tie"]},
-            "groundedness_winner": {"type": "string", "enum": ["A", "B", "tie"]},
-            "usefulness_winner": {"type": "string", "enum": ["A", "B", "tie"]},
-            "efficiency_winner": {"type": "string", "enum": ["A", "B", "tie"]},
-            "completeness_a": {"type": "number", "minimum": 1, "maximum": 5},
-            "completeness_b": {"type": "number", "minimum": 1, "maximum": 5},
-            "groundedness_a": {"type": "number", "minimum": 1, "maximum": 5},
-            "groundedness_b": {"type": "number", "minimum": 1, "maximum": 5},
-            "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
-            "reasoning": {"type": "string"},
-            "watchouts": {"type": "array", "items": {"type": "string"}},
-        },
-        "required": [
-            "winner",
-            "completeness_winner",
-            "groundedness_winner",
-            "usefulness_winner",
-            "efficiency_winner",
-            "completeness_a",
-            "completeness_b",
-            "groundedness_a",
-            "groundedness_b",
-            "confidence",
-            "reasoning",
-            "watchouts",
-        ],
+        "properties": properties,
+        "required": required,
         "additionalProperties": True,
     }
 
 
 def blind_assignment(participant_id: str, prompt_id: str) -> bool:
-    # Deterministic, auditable A/B coin flip. Returns True when Glean is presented
-    # as "Answer A". Stable across reruns so a regrade reproduces the same layout.
+    # Deterministic, auditable A/B coin flip. Returns True when treatment is
+    # presented as "Answer A". Stable across reruns so regrading reproduces layout.
     h = hashlib.sha256(f"{participant_id}/{prompt_id}".encode("utf-8")).hexdigest()
     return int(h[:8], 16) % 2 == 0
 
 
-def deblind_grade(bg: Dict[str, Any], glean_is_a: bool) -> Dict[str, Any]:
-    # Translate an A/B judge result back into glean/direct keys so downstream
-    # aggregation (collect_aggregate_rows) is unchanged.
+def deblind_grade(
+    bg: Dict[str, Any],
+    left_arm: str = "glean",
+    right_arm: str = "direct",
+    glean_is_a: Optional[bool] = None,
+) -> Dict[str, Any]:
+    """Translate blind A/B judge output back to configured arm names.
+
+    ``glean_is_a`` remains accepted for compatibility with callers of the
+    original two-arm implementation.
+    """
     if not isinstance(bg, dict):
         return bg
+    if glean_is_a is not None:
+        left_arm, right_arm = (("glean", "direct") if glean_is_a else ("direct", "glean"))
 
     def ab_to_arm(v: Any) -> Any:
         if v == "A":
-            return "glean" if glean_is_a else "direct"
+            return left_arm
         if v == "B":
-            return "direct" if glean_is_a else "glean"
+            return right_arm
         return v
 
-    out: Dict[str, Any] = {}
-    for wk in ("winner", "completeness_winner", "groundedness_winner", "usefulness_winner", "efficiency_winner"):
-        if wk in bg:
-            out[wk] = ab_to_arm(bg.get(wk))
-    if "completeness_a" in bg or "completeness_b" in bg:
-        out["completeness_glean"] = bg.get("completeness_a") if glean_is_a else bg.get("completeness_b")
-        out["completeness_direct"] = bg.get("completeness_b") if glean_is_a else bg.get("completeness_a")
-    if "groundedness_a" in bg or "groundedness_b" in bg:
-        out["groundedness_glean"] = bg.get("groundedness_a") if glean_is_a else bg.get("groundedness_b")
-        out["groundedness_direct"] = bg.get("groundedness_b") if glean_is_a else bg.get("groundedness_a")
+    out: Dict[str, Any] = {"winner": ab_to_arm(bg.get("winner"))} if "winner" in bg else {}
+    dimensions = (
+        "completeness", "groundedness", "usefulness", "efficiency",
+        "accuracy", "source_coverage", "citation_usefulness", "freshness",
+        "instruction_following", "workflow_fit",
+    )
+    for dimension in dimensions:
+        winner_key = f"{dimension}_winner"
+        if winner_key in bg:
+            out[winner_key] = ab_to_arm(bg.get(winner_key))
+        if f"{dimension}_a" in bg or f"{dimension}_b" in bg:
+            out[f"{dimension}_{left_arm}"] = bg.get(f"{dimension}_a")
+            out[f"{dimension}_{right_arm}"] = bg.get(f"{dimension}_b")
     for pk in ("confidence", "reasoning", "watchouts"):
         if pk in bg:
             out[pk] = bg.get(pk)
@@ -1381,13 +1500,17 @@ def participant_dirs(res_dir: Path, participant_id: Optional[str]) -> List[Path]
     return sorted([p for p in res_dir.iterdir() if p.is_dir() and not p.name.startswith("_")]) if res_dir.exists() else []
 
 
-def paired_prompt_dirs(participant_dir: Path) -> List[Tuple[str, Path, Path]]:
-    glean = participant_dir / "glean"
-    direct = participant_dir / "direct"
-    if not glean.exists() or not direct.exists():
+def paired_prompt_dirs(
+    participant_dir: Path,
+    treatment_arm: str = "glean",
+    control_arm: str = "direct",
+) -> List[Tuple[str, Path, Path]]:
+    treatment = participant_dir / treatment_arm
+    control = participant_dir / control_arm
+    if not treatment.exists() or not control.exists():
         return []
-    ids = sorted({p.name for p in glean.iterdir() if p.is_dir()} & {p.name for p in direct.iterdir() if p.is_dir()})
-    return [(pid, glean / pid, direct / pid) for pid in ids]
+    ids = sorted({p.name for p in treatment.iterdir() if p.is_dir()} & {p.name for p in control.iterdir() if p.is_dir()})
+    return [(pid, treatment / pid, control / pid) for pid in ids]
 
 
 def marginal_tokens(run: Dict[str, Any]) -> int:
@@ -1395,20 +1518,50 @@ def marginal_tokens(run: Dict[str, Any]) -> int:
     return int(u.get("input_tokens", 0)) + int(u.get("output_tokens", 0))
 
 
-def judge_prompt(meta: Dict[str, Any], run_a: Dict[str, Any], run_b: Dict[str, Any], hide_tokens: bool = False) -> str:
+def judge_prompt(
+    meta: Dict[str, Any],
+    run_a: Dict[str, Any],
+    run_b: Dict[str, Any],
+    hide_tokens: bool = False,
+    extended: bool = False,
+) -> str:
+    dimensions = ["completeness", "groundedness", "usefulness"]
+    if extended:
+        dimensions.extend([
+            "accuracy", "source coverage", "citation usefulness", "freshness",
+            "instruction following", "workflow fit",
+        ])
+    dimension_text = ", ".join(dimensions)
     if hide_tokens:
         # Pure-quality pass: token counts are withheld so they cannot anchor the
         # quality scores (see docs/METHODOLOGY.md).
-        guidance = "Judge purely on quality: completeness, groundedness, and usefulness."
+        guidance = f"Judge purely on quality: {dimension_text}."
         a_tok = b_tok = ""
     else:
         guidance = (
-            "Judge quality first (completeness, groundedness, usefulness). Prefer lower token "
-            "usage only when quality is materially similar. Do not reward a shorter answer if it "
-            "is incomplete, vague, or unsupported."
+            f"Judge quality first ({dimension_text}). Prefer lower token usage only when quality "
+            "is materially similar. Do not reward a shorter answer if it is incomplete, vague, "
+            "or unsupported."
         )
         a_tok = f"Answer A work tokens (input+output): {marginal_tokens(run_a)}\n"
         b_tok = f"Answer B work tokens (input+output): {marginal_tokens(run_b)}\n"
+    output_keys = (
+        '  "winner", "completeness_winner", "groundedness_winner", "usefulness_winner", '
+        '"efficiency_winner": each one of "A" | "B" | "tie"\n'
+        '  "completeness_a", "completeness_b", "groundedness_a", "groundedness_b": each a number 1-5\n'
+    )
+    if extended:
+        output_keys += (
+            '  "accuracy_winner", "source_coverage_winner", "citation_usefulness_winner", '
+            '"freshness_winner", "instruction_following_winner", "workflow_fit_winner": each one of "A" | "B" | "tie"\n'
+            '  For each of accuracy, source_coverage, citation_usefulness, freshness, '
+            'instruction_following, and workflow_fit, return *_a and *_b scores from 1-5.\n'
+        )
+    output_keys += (
+        '  "confidence": "high" | "medium" | "low"\n'
+        '  "reasoning": string\n'
+        '  "watchouts": array of strings'
+    )
     return (
         "You are an impartial evaluation judge for an A/B test comparing two assistant "
         "configurations on enterprise knowledge tasks. You are NOT told which system produced "
@@ -1419,15 +1572,8 @@ def judge_prompt(meta: Dict[str, Any], run_a: Dict[str, Any], run_b: Dict[str, A
         f"Query: {meta.get('prompt')}\n\n"
         f"{a_tok}Answer A:\n{run_a.get('_answer', '')}\n\n"
         f"{b_tok}Answer B:\n{run_b.get('_answer', '')}\n\n"
-        "Return ONLY a single JSON object (no prose, no markdown code fences) with EXACTLY "
-        "these keys:\n"
-        '  "winner", "completeness_winner", "groundedness_winner", "usefulness_winner", '
-        '"efficiency_winner": each one of "A" | "B" | "tie"\n'
-        '  "completeness_a", "completeness_b", "groundedness_a", "groundedness_b": each a '
-        "number 1-5\n"
-        '  "confidence": "high" | "medium" | "low"\n'
-        '  "reasoning": string\n'
-        '  "watchouts": array of strings'
+        "Return ONLY a single JSON object (no prose, no markdown code fences) with EXACTLY these keys:\n"
+        f"{output_keys}"
     )
 
 
@@ -1466,6 +1612,13 @@ def command_grade(args: argparse.Namespace) -> int:
         print("No participant result directories found", file=sys.stderr)
         return 1
     failures = 0
+    spec = comparison_spec(cfg)
+    treatment_arm = spec["treatment_arm"]
+    control_arm = spec["control_arm"]
+    extended_scoring = bool(
+        (cfg.get("comparison") or {}).get("extended_scoring")
+        or (cfg.get("comparison") or {}).get("variant") == "cursor-glean-plugin"
+    )
     # Lock the judge down: no MCP servers (empty strict config) and no write/exec
     # built-ins. It only needs to read the two answers and emit structured JSON.
     judge_acfg = {
@@ -1475,20 +1628,29 @@ def command_grade(args: argparse.Namespace) -> int:
         "_force_mcp_config": True,
     }
     for pdir in participants:
-        for pid, glean_dir, direct_dir in paired_prompt_dirs(pdir):
+        for pid, treatment_dir, control_dir in paired_prompt_dirs(pdir, treatment_arm, control_arm):
             grade_path = pdir / "grades" / pid / "grade.json"
             if grade_path.exists() and not args.force:
                 print(f"skip existing grade {pdir.name}/{pid}")
                 continue
-            glean_run = read_run(glean_dir)
-            direct_run = read_run(direct_dir)
-            if not glean_run or not direct_run:
+            treatment_run = read_run(treatment_dir)
+            control_run = read_run(control_dir)
+            if not treatment_run or not control_run:
                 continue
-            meta = glean_run.get("_metadata") or direct_run.get("_metadata") or {"id": pid}
-            glean_is_a = blind_assignment(pdir.name, pid)
-            run_a, run_b = (glean_run, direct_run) if glean_is_a else (direct_run, glean_run)
-            prompt = judge_prompt(meta, run_a, run_b, hide_tokens=bool(cfg.get("judge_hide_tokens", False)))
-            print(f"grading {pdir.name}/{pid} (glean shown as {'A' if glean_is_a else 'B'})", flush=True)
+            meta = treatment_run.get("_metadata") or control_run.get("_metadata") or {"id": pid}
+            treatment_is_a = blind_assignment(pdir.name, pid)
+            run_a, run_b = (treatment_run, control_run) if treatment_is_a else (control_run, treatment_run)
+            prompt = judge_prompt(
+                meta,
+                run_a,
+                run_b,
+                hide_tokens=bool(cfg.get("judge_hide_tokens", False)),
+                extended=extended_scoring,
+            )
+            print(
+                f"grading {pdir.name}/{pid} ({treatment_arm} shown as {'A' if treatment_is_a else 'B'})",
+                flush=True,
+            )
             rec = run_claude_and_record(
                 root,
                 cfg,
@@ -1498,7 +1660,7 @@ def command_grade(args: argparse.Namespace) -> int:
                 timeout=int(cfg.get("judge_timeout_seconds", 900)),
                 model_key="judge_model",
                 max_turns=int(cfg.get("judge_max_turns", 3)),
-                json_schema=grade_schema(),
+                json_schema=grade_schema(extended=extended_scoring),
                 # Judge runs on a structured-output-capable host (default claude-code),
                 # regardless of which host the arms ran on — keeps quality scores
                 # comparable across hosts and enforces the JSON-schema grade.
@@ -1524,14 +1686,26 @@ def command_grade(args: argparse.Namespace) -> int:
                 blind_grade = None
                 grade = {"error": "judge did not return parseable structured output", "raw": raw}
             else:
-                grade = deblind_grade(blind_grade, glean_is_a)
+                left_arm, right_arm = (treatment_arm, control_arm) if treatment_is_a else (control_arm, treatment_arm)
+                grade = deblind_grade(blind_grade, left_arm, right_arm)
+            assignment = {
+                "treatment_arm": treatment_arm,
+                "control_arm": control_arm,
+                "treatment_label": "A" if treatment_is_a else "B",
+                "control_label": "B" if treatment_is_a else "A",
+            }
+            if spec["legacy"]:
+                assignment.update({
+                    "glean_label": assignment["treatment_label"],
+                    "direct_label": assignment["control_label"],
+                })
             grade_record = {
                 "created_at": now_iso(),
                 "participant_id": pdir.name,
                 "prompt_id": pid,
                 "query_id": meta.get("id", pid),
                 "judge_run_dir": str(grade_path.parent / "judge_run"),
-                "blind_assignment": {"glean_label": "A" if glean_is_a else "B", "direct_label": "B" if glean_is_a else "A"},
+                "blind_assignment": assignment,
                 "blind_grade": blind_grade,
                 "grade": grade,
             }
@@ -1540,91 +1714,149 @@ def command_grade(args: argparse.Namespace) -> int:
     return 0 if failures == 0 else 1
 
 
-def validity_flags(glean: Dict[str, Any], direct: Dict[str, Any]) -> List[str]:
+def validity_flags(
+    treatment: Dict[str, Any],
+    control: Dict[str, Any],
+    treatment_arm: str = "glean",
+    control_arm: str = "direct",
+) -> List[str]:
     flags = []
-    if not glean.get("success"):
-        flags.append("glean_run_failed")
-    if not direct.get("success"):
-        flags.append("direct_run_failed")
-    if not (glean.get("transcript") or {}).get("mcp_servers_used"):
-        flags.append("glean_no_mcp_retrieval")
-    if not (direct.get("transcript") or {}).get("mcp_servers_used"):
-        flags.append("direct_no_mcp_retrieval")
-    gm = set((glean.get("transcript") or {}).get("models", {}).keys())
-    dm = set((direct.get("transcript") or {}).get("models", {}).keys())
-    if gm and dm and gm != dm:
+    for arm, run in ((treatment_arm, treatment), (control_arm, control)):
+        if not run.get("success"):
+            flags.append(f"{arm}_run_failed")
+        if not (run.get("transcript") or {}).get("mcp_servers_used"):
+            flags.append(f"{arm}_no_mcp_retrieval")
+        transcript = run.get("transcript") or {}
+        if transcript.get("routing_confounded"):
+            flags.append(f"{arm}_routing_confounded")
+        if transcript.get("plugin_present_when_disabled"):
+            flags.append(f"{arm}_plugin_present_when_disabled")
+        if transcript.get("plugin_required_but_unobserved"):
+            flags.append(f"{arm}_plugin_required_but_unobserved")
+    tm = set((treatment.get("transcript") or {}).get("models", {}).keys())
+    cm = set((control.get("transcript") or {}).get("models", {}).keys())
+    if tm and cm and tm != cm:
         flags.append("model_mismatch")
     return flags
 
 
-def collect_aggregate_rows(res: Path) -> List[Dict[str, Any]]:
+def collect_aggregate_rows(res: Path, cfg: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    cfg = cfg or {"arms": {"glean": {}, "direct": {}}}
+    spec = comparison_spec(cfg)
+    treatment_arm = spec["treatment_arm"]
+    control_arm = spec["control_arm"]
     rows = []
     for pdir in participant_dirs(res, None):
-        for pid, glean_dir, direct_dir in paired_prompt_dirs(pdir):
-            glean = read_run(glean_dir)
-            direct = read_run(direct_dir)
-            if not glean or not direct:
+        for pid, treatment_dir, control_dir in paired_prompt_dirs(pdir, treatment_arm, control_arm):
+            treatment = read_run(treatment_dir)
+            control = read_run(control_dir)
+            if not treatment or not control:
                 continue
-            meta = glean.get("_metadata") or direct.get("_metadata") or {}
+            meta = treatment.get("_metadata") or control.get("_metadata") or {}
             grade_path = pdir / "grades" / pid / "grade.json"
             grade = read_json(grade_path).get("grade") if grade_path.exists() else {}
-            flags = validity_flags(glean, direct)
-            gt = int(glean.get("total_tokens") or 0)
-            dtok = int(direct.get("total_tokens") or 0)
-            gcost = float(glean.get("computed_cost_usd") or 0.0)
-            dcost = float(direct.get("computed_cost_usd") or 0.0)
-            g_usage = glean.get("usage") or {}
-            d_usage = direct.get("usage") or {}
-            g_marginal = int(g_usage.get("input_tokens", 0)) + int(g_usage.get("output_tokens", 0))
-            d_marginal = int(d_usage.get("input_tokens", 0)) + int(d_usage.get("output_tokens", 0))
-            g_rcost = float(glean.get("total_cost_usd_reported_by_claude") or 0.0)
-            d_rcost = float(direct.get("total_cost_usd_reported_by_claude") or 0.0)
-            g_lat = glean.get("duration_ms_reported_by_claude")
-            d_lat = direct.get("duration_ms_reported_by_claude")
-            rows.append({
+            flags = validity_flags(treatment, control, treatment_arm, control_arm)
+
+            def metrics(run: Dict[str, Any]) -> Dict[str, Any]:
+                usage = run.get("usage") or {}
+                transcript = run.get("transcript") or {}
+                return {
+                    "total_tokens": int(run.get("total_tokens") or 0),
+                    "cost_usd": float(run.get("computed_cost_usd") or 0.0),
+                    "reported_cost_usd": round(float(run.get("total_cost_usd_reported_by_claude") or 0.0), 6),
+                    "marginal_tokens": int(usage.get("input_tokens", 0)) + int(usage.get("output_tokens", 0)),
+                    "latency_ms": run.get("duration_ms_reported_by_claude") if isinstance(run.get("duration_ms_reported_by_claude"), (int, float)) else "",
+                    "input_tokens": usage.get("input_tokens", 0),
+                    "output_tokens": usage.get("output_tokens", 0),
+                    "cache_write_tokens": usage.get("cache_creation_input_tokens", 0),
+                    "cache_read_tokens": usage.get("cache_read_input_tokens", 0),
+                    "mcp_servers_used": json.dumps(transcript.get("mcp_servers_used", {}), sort_keys=True),
+                    "tool_call_count": transcript.get("tool_call_count", 0),
+                    "mcp_tool_call_count": transcript.get("mcp_tool_call_count", 0),
+                    "routing_outcome": transcript.get("routing_outcome", "unknown"),
+                    "plugin_servers_used": json.dumps(transcript.get("plugin_servers_used", {}), sort_keys=True),
+                }
+
+            tm = metrics(treatment)
+            cm = metrics(control)
+            row: Dict[str, Any] = {
                 "participant_id": pdir.name,
                 "prompt_dir_id": pid,
                 "query_id": meta.get("id", pid),
                 "dept": meta.get("dept", ""),
                 "prompt": meta.get("prompt", ""),
-                "glean_total_tokens": gt,
-                "direct_total_tokens": dtok,
-                "token_savings_pct": round((dtok - gt) / dtok * 100.0, 2) if dtok else "",
-                "glean_cost_usd": gcost,
-                "direct_cost_usd": dcost,
-                "cost_savings_pct": round((dcost - gcost) / dcost * 100.0, 2) if dcost else "",
-                "glean_reported_cost_usd": round(g_rcost, 6),
-                "direct_reported_cost_usd": round(d_rcost, 6),
-                "reported_cost_savings_pct": round((d_rcost - g_rcost) / d_rcost * 100.0, 2) if d_rcost else "",
-                "glean_marginal_tokens": g_marginal,
-                "direct_marginal_tokens": d_marginal,
-                "marginal_token_savings_pct": round((d_marginal - g_marginal) / d_marginal * 100.0, 2) if d_marginal else "",
-                "glean_latency_ms": g_lat if isinstance(g_lat, (int, float)) else "",
-                "direct_latency_ms": d_lat if isinstance(d_lat, (int, float)) else "",
-                "latency_savings_pct": round((d_lat - g_lat) / d_lat * 100.0, 2) if (isinstance(g_lat, (int, float)) and isinstance(d_lat, (int, float)) and d_lat) else "",
-                "glean_input_tokens": (glean.get("usage") or {}).get("input_tokens", 0),
-                "direct_input_tokens": (direct.get("usage") or {}).get("input_tokens", 0),
-                "glean_output_tokens": (glean.get("usage") or {}).get("output_tokens", 0),
-                "direct_output_tokens": (direct.get("usage") or {}).get("output_tokens", 0),
-                "glean_cache_write_tokens": (glean.get("usage") or {}).get("cache_creation_input_tokens", 0),
-                "direct_cache_write_tokens": (direct.get("usage") or {}).get("cache_creation_input_tokens", 0),
-                "glean_cache_read_tokens": (glean.get("usage") or {}).get("cache_read_input_tokens", 0),
-                "direct_cache_read_tokens": (direct.get("usage") or {}).get("cache_read_input_tokens", 0),
-                "glean_mcp_servers_used": json.dumps((glean.get("transcript") or {}).get("mcp_servers_used", {}), sort_keys=True),
-                "direct_mcp_servers_used": json.dumps((direct.get("transcript") or {}).get("mcp_servers_used", {}), sort_keys=True),
+                "treatment_arm": treatment_arm,
+                "control_arm": control_arm,
+                "treatment_label": spec["treatment_label"],
+                "control_label": spec["control_label"],
+                "treatment_total_tokens": tm["total_tokens"],
+                "control_total_tokens": cm["total_tokens"],
+                "token_savings_pct": round((cm["total_tokens"] - tm["total_tokens"]) / cm["total_tokens"] * 100.0, 2) if cm["total_tokens"] else "",
+                "treatment_cost_usd": tm["cost_usd"],
+                "control_cost_usd": cm["cost_usd"],
+                "cost_savings_pct": round((cm["cost_usd"] - tm["cost_usd"]) / cm["cost_usd"] * 100.0, 2) if cm["cost_usd"] else "",
+                "treatment_reported_cost_usd": tm["reported_cost_usd"],
+                "control_reported_cost_usd": cm["reported_cost_usd"],
+                "reported_cost_savings_pct": round((cm["reported_cost_usd"] - tm["reported_cost_usd"]) / cm["reported_cost_usd"] * 100.0, 2) if cm["reported_cost_usd"] else "",
+                "treatment_marginal_tokens": tm["marginal_tokens"],
+                "control_marginal_tokens": cm["marginal_tokens"],
+                "marginal_token_savings_pct": round((cm["marginal_tokens"] - tm["marginal_tokens"]) / cm["marginal_tokens"] * 100.0, 2) if cm["marginal_tokens"] else "",
+                "treatment_latency_ms": tm["latency_ms"],
+                "control_latency_ms": cm["latency_ms"],
+                "latency_savings_pct": round((cm["latency_ms"] - tm["latency_ms"]) / cm["latency_ms"] * 100.0, 2) if (isinstance(tm["latency_ms"], (int, float)) and isinstance(cm["latency_ms"], (int, float)) and cm["latency_ms"]) else "",
+                "treatment_input_tokens": tm["input_tokens"],
+                "control_input_tokens": cm["input_tokens"],
+                "treatment_output_tokens": tm["output_tokens"],
+                "control_output_tokens": cm["output_tokens"],
+                "treatment_cache_write_tokens": tm["cache_write_tokens"],
+                "control_cache_write_tokens": cm["cache_write_tokens"],
+                "treatment_cache_read_tokens": tm["cache_read_tokens"],
+                "control_cache_read_tokens": cm["cache_read_tokens"],
+                "treatment_mcp_servers_used": tm["mcp_servers_used"],
+                "control_mcp_servers_used": cm["mcp_servers_used"],
+                "treatment_tool_call_count": tm["tool_call_count"],
+                "control_tool_call_count": cm["tool_call_count"],
+                "treatment_mcp_tool_call_count": tm["mcp_tool_call_count"],
+                "control_mcp_tool_call_count": cm["mcp_tool_call_count"],
+                "treatment_routing_outcome": tm["routing_outcome"],
+                "control_routing_outcome": cm["routing_outcome"],
+                "treatment_plugin_servers_used": tm["plugin_servers_used"],
+                "control_plugin_servers_used": cm["plugin_servers_used"],
                 "validity_flags": ";".join(flags),
                 "valid": not flags,
                 "winner": grade.get("winner", "") if isinstance(grade, dict) else "",
                 "completeness_winner": grade.get("completeness_winner", "") if isinstance(grade, dict) else "",
                 "groundedness_winner": grade.get("groundedness_winner", "") if isinstance(grade, dict) else "",
                 "usefulness_winner": grade.get("usefulness_winner", "") if isinstance(grade, dict) else "",
-                "completeness_glean": grade.get("completeness_glean", "") if isinstance(grade, dict) else "",
-                "completeness_direct": grade.get("completeness_direct", "") if isinstance(grade, dict) else "",
-                "groundedness_glean": grade.get("groundedness_glean", "") if isinstance(grade, dict) else "",
-                "groundedness_direct": grade.get("groundedness_direct", "") if isinstance(grade, dict) else "",
+                f"completeness_{treatment_arm}": grade.get(f"completeness_{treatment_arm}", "") if isinstance(grade, dict) else "",
+                f"completeness_{control_arm}": grade.get(f"completeness_{control_arm}", "") if isinstance(grade, dict) else "",
+                f"groundedness_{treatment_arm}": grade.get(f"groundedness_{treatment_arm}", "") if isinstance(grade, dict) else "",
+                f"groundedness_{control_arm}": grade.get(f"groundedness_{control_arm}", "") if isinstance(grade, dict) else "",
                 "judge_confidence": grade.get("confidence", "") if isinstance(grade, dict) else "",
                 "judge_reasoning": grade.get("reasoning", "") if isinstance(grade, dict) else "",
-            })
+            }
+            for dimension in (
+                "accuracy", "source_coverage", "citation_usefulness", "freshness",
+                "instruction_following", "workflow_fit",
+            ):
+                row[f"{dimension}_{treatment_arm}"] = grade.get(f"{dimension}_{treatment_arm}", "") if isinstance(grade, dict) else ""
+                row[f"{dimension}_{control_arm}"] = grade.get(f"{dimension}_{control_arm}", "") if isinstance(grade, dict) else ""
+            # Keep the historical CSV column names for existing consumers and
+            # let the report renderer remain compatible with both variants.
+            for metric in (
+                    "total_tokens", "cost_usd", "reported_cost_usd", "marginal_tokens", "latency_ms",
+                    "input_tokens", "output_tokens", "cache_write_tokens", "cache_read_tokens",
+                    "mcp_servers_used", "tool_call_count", "mcp_tool_call_count", "routing_outcome", "plugin_servers_used",
+                ):
+                    row[f"glean_{metric}"] = row[f"treatment_{metric}"]
+                    row[f"direct_{metric}"] = row[f"control_{metric}"]
+            for metric in (
+                "completeness", "groundedness", "accuracy", "source_coverage",
+                "citation_usefulness", "freshness", "instruction_following", "workflow_fit",
+            ):
+                row[f"{metric}_glean"] = row.get(f"{metric}_{treatment_arm}", "")
+                row[f"{metric}_direct"] = row.get(f"{metric}_{control_arm}", "")
+            rows.append(row)
     return rows
 
 
@@ -1654,10 +1886,16 @@ def bootstrap_savings_ci(pairs: List[Tuple[Any, Any]], n_boot: int = 2000, seed:
     return (round(ests[int(0.025 * (len(ests) - 1))], 1), round(ests[int(0.975 * (len(ests) - 1))], 1))
 
 
-def format_delta(savings_pct: float, *, positive_word: str = "lower", negative_word: str = "higher") -> str:
+def format_delta(
+    savings_pct: float,
+    *,
+    positive_word: str = "lower",
+    negative_word: str = "higher",
+    subject_word: str = "Glean",
+) -> str:
     if savings_pct >= 0:
-        return f"{savings_pct:.1f}% {positive_word} for Glean"
-    return f"{abs(savings_pct):.1f}% {negative_word} for Glean"
+        return f"{savings_pct:.1f}% {positive_word} for {subject_word}"
+    return f"{abs(savings_pct):.1f}% {negative_word} for {subject_word}"
 
 
 def preflight_report_lines(config_path: Path, cfg: Dict[str, Any]) -> Tuple[List[str], bool]:
@@ -1691,6 +1929,8 @@ def preflight_report_lines(config_path: Path, cfg: Dict[str, Any]) -> Tuple[List
                 bits.append("live failed")
             if rec.get("live_missing_required_servers"):
                 bits.append(f"live missing {rec.get('live_missing_required_servers')}")
+            if rec.get("plugin_live_flags"):
+                bits.append(f"plugin state {rec.get('plugin_live_flags')}")
             diag = static.get("strict_config_diagnostics") or {}
             if diag.get("errors"):
                 bits.append(f"strict config errors {diag.get('errors')}")
@@ -1703,7 +1943,13 @@ def command_report(args: argparse.Namespace) -> int:
     config_path, cfg = load_config(args.config)
     res = results_dir(config_path, cfg)
     res.mkdir(parents=True, exist_ok=True)
-    rows = collect_aggregate_rows(res)
+    spec = comparison_spec(cfg)
+    treatment_arm = spec["treatment_arm"]
+    control_arm = spec["control_arm"]
+    treatment_name = spec["treatment_label"]
+    control_name = spec["control_label"]
+    subject_name = spec["subject_label"]
+    rows = collect_aggregate_rows(res, cfg)
     csv_path = res / "aggregate_rows.csv"
     if rows:
         with csv_path.open("w", encoding="utf-8", newline="") as f:
@@ -1740,6 +1986,16 @@ def command_report(args: argparse.Namespace) -> int:
     comp_d = col_mean("completeness_direct") if quality_ran else 0.0
     gr_g = col_mean("groundedness_glean") if quality_ran else 0.0
     gr_d = col_mean("groundedness_direct") if quality_ran else 0.0
+    extended_quality_ran = quality_ran and any(
+        r.get("accuracy_glean") not in ("", None) for r in denom_rows
+    )
+    extended_quality = {
+        metric: (col_mean(f"{metric}_glean"), col_mean(f"{metric}_direct"))
+        for metric in (
+            "accuracy", "source_coverage", "citation_usefulness", "freshness",
+            "instruction_following", "workflow_fit",
+        )
+    }
 
     marginal_savings = pct_lower(d_marg_avg, g_marg_avg)
     total_token_savings = pct_lower(dt_avg, gt_avg)
@@ -1761,10 +2017,10 @@ def command_report(args: argparse.Namespace) -> int:
     if not invalid_run and not quality_ran:
         validity_status = "PASS with warning — quality grading not run"
 
-    mcp_usage_lines = ["| Prompt | Glean MCP usage | Direct MCP usage | Valid |", "|---|---|---|---|"]
+    mcp_usage_lines = [f"| Prompt | {treatment_name} usage | {control_name} usage | Routing | Valid |", "|---|---|---|---|---|"]
     for r in rows:
         mcp_usage_lines.append(
-            f"| {r.get('query_id')} | `{r.get('glean_mcp_servers_used')}` | `{r.get('direct_mcp_servers_used')}` | {'✅' if r.get('valid') else '❌ ' + str(r.get('validity_flags'))} |"
+            f"| {r.get('query_id')} | `{r.get('treatment_mcp_servers_used')}` | `{r.get('control_mcp_servers_used')}` | `{r.get('treatment_routing_outcome')} / {r.get('control_routing_outcome')}` | {'✅' if r.get('valid') else '❌ ' + str(r.get('validity_flags'))} |"
         )
     mcp_usage_md = "\n".join(mcp_usage_lines) if rows else "No paired rows found."
 
@@ -1780,13 +2036,25 @@ def command_report(args: argparse.Namespace) -> int:
     if quality_ran:
         quality_md = f"""## Quality judge summary
 
-| Metric | Glean MCP | Direct MCP |
+| Metric | {treatment_name} | {control_name} |
 |---|---:|---:|
 | Avg completeness | {comp_g:.2f} | {comp_d:.2f} |
 | Avg groundedness | {gr_g:.2f} | {gr_d:.2f} |
 
 Winner counts: `{dict(winner_counts)}`
 """
+        if extended_quality_ran:
+            quality_md += "\n| Extended metric | " + treatment_name + " | " + control_name + " |\n|---|---:|---:|\n"
+            extended_labels = {
+                "accuracy": "Accuracy",
+                "source_coverage": "Source coverage",
+                "citation_usefulness": "Citation usefulness",
+                "freshness": "Freshness",
+                "instruction_following": "Instruction following",
+                "workflow_fit": "Workflow fit",
+            }
+            for metric, (treatment_score, control_score) in extended_quality.items():
+                quality_md += f"| {extended_labels[metric]} | {treatment_score:.2f} | {control_score:.2f} |\n"
 
     warning_md = ""
     if invalid_run:
@@ -1810,23 +2078,23 @@ Winner counts: `{dict(winner_counts)}`
 
 Primary metric is the cost {host_label} reports per run. List-price-normalized cost applies the configurable `pricing_per_million` rates uniformly across both arms.
 
-| Metric | Glean MCP | Direct MCP | Delta |
+| Metric | {treatment_name} | {control_name} | Delta |
 |---|---:|---:|---:|
-| Avg reported cost / task | ${g_rc_avg:,.4f} | ${d_rc_avg:,.4f} | {format_delta(reported_cost_savings)} |
-| Avg list-price-normalized cost / task | ${gc_avg:,.4f} | ${dc_avg:,.4f} | {format_delta(list_cost_savings)} |
+| Avg reported cost / task | ${g_rc_avg:,.4f} | ${d_rc_avg:,.4f} | {format_delta(reported_cost_savings, subject_word=subject_name)} |
+| Avg list-price-normalized cost / task | ${gc_avg:,.4f} | ${dc_avg:,.4f} | {format_delta(list_cost_savings, subject_word=subject_name)} |
 
 > List-price-normalized cost is a rate-card comparison, not billed spend. Verify `pricing_per_million` against current model list prices; it can diverge sharply from reported cost when cache-creation tokens dominate.
 >
-> Reported-cost savings for Glean: **{reported_cost_savings:.1f}%**{ci_str(reported_cost_ci)}."""
+> Reported-cost savings for {subject_name}: **{reported_cost_savings:.1f}%**{ci_str(reported_cost_ci)}."""
         tokens_headline_note = "Prefer marginal tokens + reported cost for headline claims."
     else:
         cost_md = f"""## Cost
 
 {host_label} does not expose a per-run vendor dollar cost, so the cost metric is **list-price-normalized**: the configurable `pricing_per_million` rate card applied uniformly to both arms' token usage. It is a rate-card comparison, not billed spend.
 
-| Metric | Glean MCP | Direct MCP | Delta |
+| Metric | {treatment_name} | {control_name} | Delta |
 |---|---:|---:|---:|
-| Avg list-price-normalized cost / task | ${gc_avg:,.4f} | ${dc_avg:,.4f} | {format_delta(list_cost_savings)} |
+| Avg list-price-normalized cost / task | ${gc_avg:,.4f} | ${dc_avg:,.4f} | {format_delta(list_cost_savings, subject_word=subject_name)} |
 
 > Compare on this normalized cost plus marginal tokens and latency — not on any vendor-reported dollar figure."""
         tokens_headline_note = "Prefer marginal tokens + latency for headline claims."
@@ -1863,31 +2131,35 @@ Eval: `{cfg.get('eval_name', '')}`
 
 Marginal = per-prompt work (input + output). Fixed = per-session cache creation (schema/context loaded on each fresh session, largely identical across arms and so mostly cancelling in the delta). Cache-read tokens are in the per-row CSV.
 
-| Metric | Glean MCP | Direct MCP | Delta |
+| Metric | {treatment_name} | {control_name} | Delta |
 |---|---:|---:|---:|
-| Avg marginal tokens / task | {g_marg_avg:,.0f} | {d_marg_avg:,.0f} | {format_delta(marginal_savings)} |
+| Avg marginal tokens / task | {g_marg_avg:,.0f} | {d_marg_avg:,.0f} | {format_delta(marginal_savings, subject_word=subject_name)} |
 | Avg fixed (cache-creation) tokens / task | {g_fixed_avg:,.0f} | {d_fixed_avg:,.0f} | — |
-| Avg total tokens / task | {gt_avg:,.0f} | {dt_avg:,.0f} | {format_delta(total_token_savings)} |
+| Avg total tokens / task | {gt_avg:,.0f} | {dt_avg:,.0f} | {format_delta(total_token_savings, subject_word=subject_name)} |
 
 > {tokens_headline_note} Raw totals are dominated by per-session cache creation and can mislead.
 >
-> Marginal-token savings for Glean: **{marginal_savings:.1f}%**{ci_str(marginal_ci)}.
+> Marginal-token savings for {subject_name}: **{marginal_savings:.1f}%**{ci_str(marginal_ci)}.
 
 ## Latency
 
-| Metric | Glean MCP | Direct MCP | Delta |
+| Metric | {treatment_name} | {control_name} | Delta |
 |---|---:|---:|---:|
-| Avg wall-clock / task | {g_lat_avg / 1000:,.1f}s | {d_lat_avg / 1000:,.1f}s | {format_delta(latency_savings, positive_word='faster', negative_word='slower')} |
+| Avg wall-clock / task | {g_lat_avg / 1000:,.1f}s | {d_lat_avg / 1000:,.1f}s | {format_delta(latency_savings, positive_word='faster', negative_word='slower', subject_word=subject_name)} |
 
 {quality_md}
 ## Validity notes
 
 Rows with any of these flags should be reviewed/excluded before executive claims:
 
-- `glean_run_failed`
-- `direct_run_failed`
-- `glean_no_mcp_retrieval`
-- `direct_no_mcp_retrieval`
+- `{treatment_arm}_run_failed`
+- `{control_arm}_run_failed`
+- `{treatment_arm}_no_mcp_retrieval`
+- `{control_arm}_no_mcp_retrieval`
+- `{treatment_arm}_routing_confounded`
+- `{control_arm}_routing_confounded`
+- `{control_arm}_plugin_present_when_disabled`
+- `{treatment_arm}_plugin_required_but_unobserved`
 - `model_mismatch`
 
 Detailed rows: [`aggregate_rows.csv`](aggregate_rows.csv)
@@ -1976,9 +2248,12 @@ def command_import(args: argparse.Namespace) -> int:
             safe_extract_zip(zip_path, tmp)
             top_dirs = [p for p in tmp.iterdir() if p.is_dir() and not p.name.startswith("_")]
             # Participant dirs contain at least one arm directory. Ignore docs/metadata-only dirs.
+            spec = comparison_spec(cfg)
             participant_dirs_found = [
                 p for p in top_dirs
-                if (p / "glean").exists() or (p / "direct").exists() or (p / "grades").exists()
+                if (p / spec["treatment_arm"]).exists()
+                or (p / spec["control_arm"]).exists()
+                or (p / "grades").exists()
             ]
             if args.participant_id:
                 participant_dirs_found = [p for p in participant_dirs_found if p.name == args.participant_id]
@@ -2020,7 +2295,7 @@ def command_doctor(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Run and analyze Glean MCP A/B evaluations in Claude Code.")
+    p = argparse.ArgumentParser(description="Run and analyze Glean MCP A/B evaluations across supported agent hosts.")
     p.add_argument("--version", action="version", version="glean-mcp-eval 0.1.0")
     sub = p.add_subparsers(dest="command", required=True)
 
@@ -2080,10 +2355,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--rerun-existing", action="store_true", help="Rerun prompts with an existing successful run")
     sp.set_defaults(func=command_run_cli)
 
-    sp = sub.add_parser("smoke-test", help="Preflight both arms and run a small prompt subset")
+    sp = sub.add_parser("smoke-test", help="Preflight configured arms and run a small prompt subset")
     add_config(sp)
     add_host(sp)
-    sp.add_argument("--arm", default="both", choices=["both", "glean", "direct"])
+    sp.add_argument("--arm", default="both", help="Arm name from config, or 'both' (default)")
     sp.add_argument("--participant-id", required=True)
     sp.add_argument("--prompt-count", type=int, default=3)
     sp.add_argument("--dry-run", action="store_true")
@@ -2091,7 +2366,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--rerun-existing", action="store_true")
     sp.set_defaults(func=command_smoke_test)
 
-    sp = sub.add_parser("run-all", help="Run both arms, grade, report, and package")
+    sp = sub.add_parser("run-all", help="Run configured treatment/control arms, grade, report, and package")
     add_config(sp)
     add_host(sp)
     sp.add_argument("--participant-id", required=True)
@@ -2102,7 +2377,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--rerun-existing", action="store_true")
     sp.set_defaults(func=command_run_all)
 
-    sp = sub.add_parser("grade", help="Judge paired Glean/direct answers")
+    sp = sub.add_parser("grade", help="Judge paired treatment/control answers")
     add_config(sp)
     sp.add_argument("--participant-id", help="Participant ID to grade; omit for all")
     sp.add_argument("--force", action="store_true", help="Regenerate existing grades")
@@ -2131,7 +2406,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parser.parse_args(argv)
     try:
         return int(args.func(args))
-    except EvalError as e:
+    except (EvalError, HostSetupError) as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:
