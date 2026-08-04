@@ -1205,14 +1205,41 @@ def safe_prompt_id(prompt_id: str) -> str:
 def render_wrapper(wrapper: str, row: Dict[str, str]) -> str:
     # Literal substitution, NOT str.format(): a golden prompt may legitimately
     # contain { or } (JSON, code, table names), which would crash .format().
+    # Keep the supported row metadata explicit so prompt packs can add routing
+    # guidance without allowing arbitrary format-string evaluation.
+    values = {
+        "prompt": row.get("Prompt", ""),
+        "id": row.get("ID", ""),
+        "dept": row.get("Dept", ""),
+        "workflow": row.get("Workflow", ""),
+        "expected_evidence": row.get("ExpectedEvidence", ""),
+        "why_it_matters": row.get("WhyItMatters", ""),
+        "expected_answer": row.get("ExpectedAnswer", ""),
+    }
     out = wrapper
-    for placeholder, value in (
-        ("{prompt}", row.get("Prompt", "")),
-        ("{id}", row.get("ID", "")),
-        ("{dept}", row.get("Dept", "")),
-    ):
-        out = out.replace(placeholder, value)
+    for key, value in values.items():
+        out = out.replace("{" + key + "}", str(value or ""))
     return out
+
+
+def render_prompt(cfg: Dict[str, Any], row: Dict[str, str]) -> str:
+    """Render the agent prompt and optional source-routing instruction.
+
+    `prompt_routing_instruction` is deliberately opt-in and is prepended to
+    the same base prompt for both arms. This preserves paired-prompt wording
+    while allowing a study to tell the agent to use source-specific read-only
+    MCPs (for example, Atlassian for Jira/Confluence). It is guidance, not a
+    routing guarantee; actual MCP usage must still be validated from the
+    transcript.
+    """
+    wrapper = cfg.get("prompt_wrapper") or "{prompt}"
+    prompt = render_wrapper(str(wrapper), row)
+    routing = cfg.get("prompt_routing_instruction")
+    if routing:
+        instruction = render_wrapper(str(routing), row).strip()
+        if instruction:
+            return instruction + "\n\n" + prompt
+    return prompt
 
 
 
@@ -1276,7 +1303,6 @@ def command_run(args: argparse.Namespace) -> int:
     if not args.force and not args.dry_run:
         require_passing_preflight(config_path, cfg, args.arm)
     out_root = results_dir(config_path, cfg) / args.participant_id / args.arm
-    wrapper = cfg.get("prompt_wrapper") or "{prompt}"
     settings = plugin_config(cfg, acfg)
     manifest = {
         "eval_name": cfg.get("eval_name"),
@@ -1305,7 +1331,7 @@ def command_run(args: argparse.Namespace) -> int:
         adapter.setup_arm(root, cfg, acfg, args.arm)
       for i, row in enumerate(prompts, 1):
         pid = safe_prompt_id(row["ID"])
-        prompt_text = render_wrapper(wrapper, row)
+        prompt_text = render_prompt(cfg, row)
         run_dir = out_root / pid
         existing_run = run_dir / "run.json"
         if not args.dry_run and not getattr(args, "rerun_existing", False) and existing_run.exists():

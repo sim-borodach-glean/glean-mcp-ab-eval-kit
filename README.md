@@ -74,7 +74,7 @@ Claude Code is the reference host because it supports:
 - transcript-derived usage and cost
 - structured judge output
 
-Cursor support exists as a secondary adapter. The original Cursor Glean-MCP-vs-direct-MCP runbook is in [`docs/hosts/cursor.md`](docs/hosts/cursor.md); the separate Glean Cursor plugin comparison is in [`docs/hosts/cursor-glean-plugin.md`](docs/hosts/cursor-glean-plugin.md), with its [experiment brief](docs/CURSOR_GLEAN_PLUGIN_EXPERIMENT_BRIEF.md), [customer message](docs/CURSOR_GLEAN_PLUGIN_CUSTOMER_MESSAGE.md), [scoring sheet](docs/CURSOR_GLEAN_PLUGIN_SCORING_SHEET.md), and [readout template](docs/CURSOR_GLEAN_PLUGIN_READOUT_TEMPLATE.md).
+Cursor support exists as a secondary adapter. The original Cursor Glean-MCP-vs-direct-MCP runbook is in [`docs/hosts/cursor.md`](docs/hosts/cursor.md); the separate Glean Cursor plugin comparison is in [`docs/hosts/cursor-glean-plugin.md`](docs/hosts/cursor-glean-plugin.md), with its [experiment brief](docs/CURSOR_GLEAN_PLUGIN_EXPERIMENT_BRIEF.md), [customer message](docs/CURSOR_GLEAN_PLUGIN_CUSTOMER_MESSAGE.md), [scoring sheet](docs/CURSOR_GLEAN_PLUGIN_SCORING_SHEET.md), and [readout template](docs/CURSOR_GLEAN_PLUGIN_READOUT_TEMPLATE.md). The Cursor plugin example can also prepend source-specific read-only MCP guidance from each prompt's `ExpectedEvidence` metadata, such as using Atlassian for Jira/Confluence, Slack for Slack, and GitHub for pull requests or code; actual routing remains transcript-validated.
 
 ## Quickstart for an operator
 

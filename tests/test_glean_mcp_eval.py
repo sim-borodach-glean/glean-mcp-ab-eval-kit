@@ -380,6 +380,26 @@ class WrapperTest(unittest.TestCase):
         self.assertIn('{"a":1}', out)
         self.assertIn("Dept Eng / Q1", out)
 
+    def test_prompt_routing_instruction_uses_expected_evidence(self):
+        cfg = {
+            "prompt_wrapper": "Question: {prompt}",
+            "prompt_routing_instruction": (
+                "Use source-specific read-only MCPs for: {expected_evidence}."
+            ),
+        }
+        row = {
+            "Prompt": "Find the current issue status.",
+            "ExpectedEvidence": "Jira, Confluence, Slack",
+        }
+        out = gme.render_prompt(cfg, row)
+        self.assertTrue(out.startswith("Use source-specific read-only MCPs"))
+        self.assertIn("Jira, Confluence, Slack", out)
+        self.assertIn("Question: Find the current issue status.", out)
+
+    def test_prompt_routing_instruction_is_opt_in(self):
+        row = {"Prompt": "Question?"}
+        self.assertEqual(gme.render_prompt({"prompt_wrapper": "{prompt}"}, row), "Question?")
+
 
 class BootstrapTest(unittest.TestCase):
     def test_constant_savings_gives_tight_ci(self):

@@ -85,6 +85,23 @@ prompts with real customer engineering workflows where appropriate. The
 config intentionally uses the same shared MCP file for both arms; the plugin is
 the experimental variable, not the MCP server set.
 
+### Source-specific routing guidance
+
+The plugin example also enables `prompt_routing_instruction`. The runner
+prepends that instruction to both arms and fills `{expected_evidence}` from the
+prompt TSV metadata. For example, a prompt whose metadata names Jira,
+Confluence, Slack, and GitHub tells the agent to use the corresponding
+read-only source-specific MCPs—Atlassian for Jira/Confluence, Slack for Slack,
+and GitHub for pull requests or code—rather than relying only on generic Glean
+retrieval.
+
+This is an explicit preference, not a guarantee that a tool will be called.
+Always inspect `mcp_servers_used` and `routing_outcome` in each `run.json`.
+The instruction is identical in treatment and control so it does not change
+the paired question. Prompts intended to test explicit plugin commands such as
+`/glean_run` should remain a separate routing/UX track rather than being pooled
+with this quality comparison.
+
 Optional explicit plugin path:
 
 ```bash
