@@ -400,6 +400,80 @@ class WrapperTest(unittest.TestCase):
         row = {"Prompt": "Question?"}
         self.assertEqual(gme.render_prompt({"prompt_wrapper": "{prompt}"}, row), "Question?")
 
+    def test_prefetch_plan_and_verification_require_exact_tools(self):
+        tools = [
+            "mcp__Atlassian-MCP-Server__searchJiraIssuesUsingJql",
+            "mcp__slack__slack_search_public_and_private",
+        ]
+        cfg = {
+            "prefetch": {
+                "enabled": True,
+                "strict": True,
+                "tool_plan_by_prompt": {"Q1": tools},
+            }
+        }
+        self.assertEqual(gme.prefetch_tool_plan(cfg, "treatment", "Q1"), tools)
+        prompt = gme.build_prefetch_prompt({"Prompt": "Find issue status."}, tools)
+        self.assertIn(tools[0], prompt)
+        self.assertIn(tools[1], prompt)
+        record = {
+            "success": True,
+            "answer_text": "Evidence digest",
+            "transcript": {
+                "tool_calls": [
+                    {"name": "mcp__Atlassian-MCP-Server__searchJiraIssuesUsingJql", "server": "Atlassian-MCP-Server"},
+                    {"name": "mcp__slack__slack_search_public_and_private", "server": "slack"},
+                ]
+            },
+        }
+        verification = gme.verify_prefetch_record(record, tools)
+        self.assertTrue(verification["passed"])
+        self.assertIn("Evidence digest", gme.inject_prefetch_evidence("Question?", record, verification))
+
+    def test_prefetch_verification_reports_missing_and_unexpected_tools(self):
+        required = ["mcp__Atlassian-MCP-Server__searchJiraIssuesUsingJql"]
+        record = {
+            "success": True,
+            "transcript": {
+                "tool_calls": [
+                    {"name": "mcp__slack__slack_search_public", "server": "slack"},
+                ]
+            },
+        }
+        verification = gme.verify_prefetch_record(record, required)
+        self.assertFalse(verification["passed"])
+        self.assertEqual(verification["missing_tools"], required)
+        self.assertEqual(verification["unexpected_mcp_tools"], ["mcp__slack__slack_search_public"])
+        self.assertEqual(verification["unexpected_tools"], ["mcp__slack__slack_search_public"])
+
+    def test_prefetch_metrics_are_added_without_changing_answer_routing(self):
+        record = {
+            "usage": {"input_tokens": 10, "output_tokens": 5},
+            "duration_ms_reported_by_claude": 100,
+            "transcript": {
+                "tool_calls": [{"name": "mcp__glean_default__search", "server": "glean_default"}],
+                "mcp_servers_used": {"glean_default": 1},
+                "routing_outcome": "mcp",
+                "plugin_servers_used": {},
+            },
+        }
+        prefetch = {
+            "usage": {"input_tokens": 20, "output_tokens": 7},
+            "duration_ms": 300,
+            "transcript": {
+                "tool_calls": [{"name": "mcp__slack__slack_search_public", "server": "slack"}],
+                "mcp_servers_used": {"slack": 1},
+            },
+        }
+        verification = {"passed": True}
+        gme.merge_prefetch_into_record(record, prefetch, verification, {"pricing_per_million": {}})
+        self.assertEqual(record["duration_ms_reported_by_claude"], 400)
+        self.assertEqual(record["usage"]["input_tokens"], 30)
+        self.assertEqual(record["transcript"]["mcp_servers_used"], {"slack": 1, "glean_default": 1})
+        self.assertEqual(record["transcript"]["routing_outcome"], "mcp")
+        self.assertEqual(record["transcript"]["prefetch_mcp_servers_used"], {"slack": 1})
+        self.assertEqual(verification["tool_call_count"], 1)
+
 
 class BootstrapTest(unittest.TestCase):
     def test_constant_savings_gives_tight_ci(self):

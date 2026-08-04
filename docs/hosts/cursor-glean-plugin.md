@@ -102,6 +102,25 @@ the paired question. Prompts intended to test explicit plugin commands such as
 `/glean_run` should remain a separate routing/UX track rather than being pooled
 with this quality comparison.
 
+### Deterministic source prefetch
+
+The plugin example enables a Cursor-mediated prefetch plan for the scored
+prompts. Before the answer session, the runner starts a separate read-only
+Cursor session that must call the exact configured MCP tools for that
+prompt—currently Jira/Confluence through Atlassian and Slack through Slack.
+The runner verifies the observed tool names, saves the prefetch transcript under
+`results/<participant>/<arm>/<prompt>/prefetch/`, and injects the returned
+evidence digest into the answer prompt. If a required tool is missing or an
+unexpected MCP tool is used in strict mode, the prompt stops rather than being
+scored.
+
+This reuses Cursor's existing OAuth session. It is deterministic at the
+verified-tool level, but Cursor still supplies valid query arguments and
+returns the evidence; it is not a direct MCP HTTP client. Add a plan under
+`prefetch.tool_plan_by_prompt` only for tools present in the arm allowlist.
+Existing successful rows are skipped, so use `--rerun-existing` after enabling
+or changing a prefetch plan.
+
 Optional explicit plugin path:
 
 ```bash

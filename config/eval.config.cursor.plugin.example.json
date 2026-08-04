@@ -41,6 +41,58 @@
   },
   "prompt_wrapper": "Answer the following enterprise knowledge question. This task is STRICTLY READ-ONLY: use only search and read tools to find current, grounded sources. Never create, edit, comment on, transition, delete, or otherwise modify any content, and never use a write action as a workaround to reach data. Cite source names/URLs when available. If you cannot find enough evidence, say what is missing.\n\nQuestion:\n{prompt}",
   "prompt_routing_instruction": "Use the available source-specific read-only MCP tools for the source systems named below. In particular, use Atlassian MCP for Jira or Confluence, Slack MCP for Slack, and GitHub MCP for pull requests or code. Do not rely solely on generic Glean retrieval when a named source-specific MCP is available; use the relevant direct source and cite it. If a listed source is unavailable or has no relevant evidence, say so instead of inventing a result.\n\nExpected source systems for this question: {expected_evidence}",
+  "prefetch": {
+    "enabled": true,
+    "strict": true,
+    "timeout_seconds": 300,
+    "max_turns": 8,
+    "instruction": "Use the tool schemas to form valid read-only search arguments. Return evidence and citations only; do not answer from memory.",
+    "tool_plan_by_prompt": {
+      "ENG_001": [
+        "mcp__Atlassian-MCP-Server__searchJiraIssuesUsingJql",
+        "mcp__Atlassian-MCP-Server__searchConfluenceUsingCql",
+        "mcp__slack__slack_search_public_and_private"
+      ],
+      "ENG_002": [
+        "mcp__Atlassian-MCP-Server__searchConfluenceUsingCql",
+        "mcp__slack__slack_search_public_and_private"
+      ],
+      "ENG_003": [
+        "mcp__Atlassian-MCP-Server__searchJiraIssuesUsingJql",
+        "mcp__slack__slack_search_public_and_private"
+      ],
+      "ENG_004": [
+        "mcp__Atlassian-MCP-Server__searchConfluenceUsingCql",
+        "mcp__slack__slack_search_public_and_private"
+      ],
+      "ENG_005": [
+        "mcp__Atlassian-MCP-Server__searchJiraIssuesUsingJql",
+        "mcp__Atlassian-MCP-Server__searchConfluenceUsingCql"
+      ],
+      "ENG_006": [
+        "mcp__Atlassian-MCP-Server__searchJiraIssuesUsingJql",
+        "mcp__slack__slack_search_public_and_private"
+      ],
+      "ENG_007": [
+        "mcp__Atlassian-MCP-Server__searchJiraIssuesUsingJql",
+        "mcp__Atlassian-MCP-Server__searchConfluenceUsingCql",
+        "mcp__slack__slack_search_public_and_private"
+      ],
+      "IT_001": [
+        "mcp__Atlassian-MCP-Server__searchConfluenceUsingCql",
+        "mcp__Atlassian-MCP-Server__searchJiraIssuesUsingJql"
+      ],
+      "PM_001": [
+        "mcp__Atlassian-MCP-Server__searchJiraIssuesUsingJql",
+        "mcp__Atlassian-MCP-Server__searchConfluenceUsingCql",
+        "mcp__slack__slack_search_public_and_private"
+      ],
+      "SEC_002": [
+        "mcp__Atlassian-MCP-Server__searchConfluenceUsingCql",
+        "mcp__slack__slack_search_public_and_private"
+      ]
+    }
+  },
   "preflight_timeout_seconds": 400,
   "run_timeout_seconds": 900,
   "pricing_per_million": {
