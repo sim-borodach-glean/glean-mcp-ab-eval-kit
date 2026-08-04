@@ -94,15 +94,6 @@ export CURSOR_GLEAN_PLUGIN_DIR="$HOME/.cursor/plugins/cache/gleanwork-glean-plug
 If omitted, the evaluator discovers the newest matching `glean-vnext` plugin
 manifest under `~/.cursor/plugins/cache`.
 
-Optional explicit plugin path:
-
-```bash
-export CURSOR_GLEAN_PLUGIN_DIR="$HOME/.cursor/plugins/cache/gleanwork-glean-plugins-vnext/glean-vnext/<version-hash>"
-```
-
-If omitted, the evaluator discovers the newest matching `glean-vnext` plugin
-manifest under `~/.cursor/plugins/cache`.
-
 ## Doctor and dry run
 
 ```bash
@@ -115,6 +106,46 @@ python3 scripts/glean_mcp_eval.py run --config eval.config.json \
 
 The treatment dry run should include `--plugin-dir`. The control dry run should
 not include it.
+
+## Explicit live preflight commands
+
+`doctor` checks local files, the host executable, plugin installation metadata,
+and static MCP configuration. It does **not** call the model or MCP tools.
+
+The standalone live preflight commands are still available. Run them in arm
+order; do not preflight both arms back-to-back if the plugin is active:
+
+```bash
+# 1. Verify the plugin-enabled treatment environment.
+python3 scripts/glean_mcp_eval.py preflight \
+  --config eval.config.json \
+  --arm treatment \
+  --live
+
+# 2. After treatment is complete, manually deactivate/uninstall the plugin.
+#    Then verify the control environment.
+python3 scripts/glean_mcp_eval.py preflight \
+  --config eval.config.json \
+  --arm control \
+  --live
+```
+
+A live preflight runs a harmless probe and records its result under
+`results/_preflight/<arm>/latest.json`. It verifies expected MCP tool usage and,
+for this variant, verifies that the plugin is observed in treatment and absent
+in control. A failed preflight blocks the corresponding arm unless `--force` is
+used.
+
+You can then run the arms separately:
+
+```bash
+python3 scripts/glean_mcp_eval.py run \
+  --config eval.config.json --arm treatment --participant-id user01
+
+# Deactivate/uninstall the plugin manually, then:
+python3 scripts/glean_mcp_eval.py run \
+  --config eval.config.json --arm control --participant-id user01
+```
 
 ## Three-prompt smoke test
 
