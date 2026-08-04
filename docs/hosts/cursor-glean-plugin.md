@@ -107,8 +107,9 @@ with this quality comparison.
 The plugin example enables a Cursor-mediated prefetch plan for the scored
 prompts. Before the answer session, the runner starts a separate read-only
 Cursor session that must call the exact configured MCP tools for that
-prompt—currently Jira/Confluence through Atlassian and Slack through Slack.
-The runner verifies the observed tool names, saves the prefetch transcript under
+prompt—currently ordinary Glean search plus Jira/Confluence through Atlassian
+and Slack through Slack. The runner verifies the observed tool names, saves the
+prefetch transcript under
 `results/<participant>/<arm>/<prompt>/prefetch/`, and injects the returned
 evidence digest into the answer prompt. If a required tool is missing or an
 unexpected MCP tool is used in strict mode, the prompt stops rather than being
@@ -116,7 +117,9 @@ scored.
 
 This reuses Cursor's existing OAuth session. It is deterministic at the
 verified-tool level, but Cursor still supplies valid query arguments and
-returns the evidence; it is not a direct MCP HTTP client. Add a plan under
+returns the evidence; it is not a direct MCP HTTP client. Ordinary Glean search
+is now part of every shared plan so both arms have the same Glean baseline.
+Add a plan under
 `prefetch.tool_plan_by_prompt` only for tools present in the arm allowlist.
 Existing successful rows are skipped, so use `--rerun-existing` after enabling
 or changing a prefetch plan.

@@ -49,45 +49,55 @@
     "instruction": "Use the tool schemas to form valid read-only search arguments. Return evidence and citations only; do not answer from memory.",
     "tool_plan_by_prompt": {
       "ENG_001": [
+        "mcp__glean_default__search",
         "mcp__Atlassian-MCP-Server__searchJiraIssuesUsingJql",
         "mcp__Atlassian-MCP-Server__searchConfluenceUsingCql",
         "mcp__slack__slack_search_public_and_private"
       ],
       "ENG_002": [
+        "mcp__glean_default__search",
         "mcp__Atlassian-MCP-Server__searchConfluenceUsingCql",
         "mcp__slack__slack_search_public_and_private"
       ],
       "ENG_003": [
+        "mcp__glean_default__search",
         "mcp__Atlassian-MCP-Server__searchJiraIssuesUsingJql",
         "mcp__slack__slack_search_public_and_private"
       ],
       "ENG_004": [
+        "mcp__glean_default__search",
         "mcp__Atlassian-MCP-Server__searchConfluenceUsingCql",
         "mcp__slack__slack_search_public_and_private"
       ],
       "ENG_005": [
+        "mcp__glean_default__search",
         "mcp__Atlassian-MCP-Server__searchJiraIssuesUsingJql",
         "mcp__Atlassian-MCP-Server__searchConfluenceUsingCql"
       ],
       "ENG_006": [
+        "mcp__glean_default__search",
         "mcp__Atlassian-MCP-Server__searchJiraIssuesUsingJql",
         "mcp__slack__slack_search_public_and_private"
       ],
       "ENG_007": [
+        "mcp__glean_default__search",
         "mcp__Atlassian-MCP-Server__searchJiraIssuesUsingJql",
         "mcp__Atlassian-MCP-Server__searchConfluenceUsingCql",
         "mcp__slack__slack_search_public_and_private"
       ],
       "IT_001": [
+        "mcp__glean_default__search",
         "mcp__Atlassian-MCP-Server__searchConfluenceUsingCql",
         "mcp__Atlassian-MCP-Server__searchJiraIssuesUsingJql"
       ],
       "PM_001": [
+        "mcp__glean_default__search",
         "mcp__Atlassian-MCP-Server__searchJiraIssuesUsingJql",
         "mcp__Atlassian-MCP-Server__searchConfluenceUsingCql",
         "mcp__slack__slack_search_public_and_private"
       ],
       "SEC_002": [
+        "mcp__glean_default__search",
         "mcp__Atlassian-MCP-Server__searchConfluenceUsingCql",
         "mcp__slack__slack_search_public_and_private"
       ]
@@ -108,7 +118,7 @@
       "mcp_config": "mcp/plugin.shared.mcp.json",
       "expected_mcp_servers": ["glean_default", "Atlassian-MCP-Server", "slack", "github", "google_drive"],
       "forbidden_mcp_servers": ["notion", "gmail", "outlook", "zoom", "salesforce"],
-      "require_live_tool_servers": ["plugin-glean-vnext-glean", "Atlassian-MCP-Server", "slack"],
+      "require_live_tool_servers": ["plugin-glean-vnext-glean", "glean_default", "Atlassian-MCP-Server", "slack"],
       "allowed_tools": [
         "mcp__plugin-glean-vnext-glean__setup",
         "mcp__plugin-glean-vnext-glean__find_skills",
@@ -153,7 +163,7 @@
         "mcp__slack__slack_schedule_message",
         "mcp__slack__slack_create_canvas"
       ],
-      "preflight_prompt": "Use the Glean Cursor plugin's glean_run capability to perform one harmless read-only discovery for the term \"MCP\". Then use the Atlassian search tool for \"policy\" and Slack public search for \"hello\". Return one short line per capability stating whether it returned results. Do not write anything.",
+      "preflight_prompt": "Use the Glean Cursor plugin's glean_run capability to perform one harmless read-only discovery for the term \"MCP\". Then use the ordinary Glean MCP search for \"MCP\", the Atlassian search tool for \"policy\", and Slack public search for \"hello\". Return one short line per capability stating whether it returned results. Do not write anything.",
       "cursor_plugin": {
         "manual_confirmation": false
       }
