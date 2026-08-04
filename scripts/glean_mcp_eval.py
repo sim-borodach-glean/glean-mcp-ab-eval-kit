@@ -269,6 +269,100 @@ def command_setup(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_setup_cursor_plugin(args: argparse.Namespace) -> int:
+    """Bootstrap a local Cursor plugin evaluation from the customer's MCP config.
+
+    This creates ignored local files and copies only the selected server entries
+    from ~/.cursor/mcp.json (or --source). It never prints credential values.
+    """
+    config_path = Path(args.config).expanduser().resolve()
+    root = config_path.parent
+    template_config = root / "config" / "eval.config.cursor.plugin.example.json"
+    prompt_source = Path(args.prompt_source or (root / "prompts" / "golden_prompts.cursor.plugin.example.tsv"))
+    if not prompt_source.is_absolute():
+        prompt_source = root / prompt_source
+    mcp_source = Path(args.source).expanduser().resolve()
+    if not template_config.exists():
+        raise EvalError(f"Cursor plugin example config not found: {template_config}")
+    if not prompt_source.exists():
+        raise EvalError(f"Cursor plugin prompt pack not found: {prompt_source}")
+    if not mcp_source.exists():
+        raise EvalError(
+            f"Cursor MCP config not found: {mcp_source}. Start Cursor/configure the MCP servers, "
+            "or pass --source /path/to/mcp.json."
+        )
+
+    fresh_config = args.force or not config_path.exists()
+    cfg = read_json(template_config) if fresh_config else read_json(config_path)
+    if not isinstance(cfg.get("comparison"), dict) or (cfg.get("comparison") or {}).get("variant") != "cursor-glean-plugin":
+        raise EvalError(
+            f"{config_path} is not a Cursor plugin evaluation config. Use --force to replace it "
+            "with the plugin example, or choose a different --config path."
+        )
+    source_data = read_json(mcp_source)
+    source_servers = source_data.get("mcpServers") if isinstance(source_data, dict) else None
+    if not isinstance(source_servers, dict):
+        raise EvalError(f"No top-level mcpServers object found in {mcp_source}")
+
+    expected = []
+    for arm_cfg in (cfg.get("arms") or {}).values():
+        for name in arm_cfg.get("expected_mcp_servers", []) or []:
+            if name not in expected:
+                expected.append(str(name))
+    requested = args.servers or expected
+    if isinstance(requested, str):
+        requested = [item.strip() for item in requested.split(",") if item.strip()]
+    else:
+        requested = [str(item).strip() for item in requested if str(item).strip()]
+    by_normalized = {normalize_server_name(name): name for name in source_servers}
+    missing = [name for name in requested if normalize_server_name(name) not in by_normalized]
+    if missing:
+        raise EvalError(
+            f"These required Cursor MCP servers are missing from {mcp_source}: {', '.join(missing)}. "
+            f"Available identifiers: {', '.join(sorted(source_servers)) or '(none)'}. "
+            "Configure/authenticate them in Cursor or pass --servers with the intended subset."
+        )
+    selected = {
+        by_normalized[name_norm]: copy.deepcopy(source_servers[by_normalized[name_norm]])
+        for name_norm in (normalize_server_name(name) for name in requested)
+    }
+
+    prompt_dest = Path(cfg.get("prompts_file", "golden_prompts.tsv"))
+    if not prompt_dest.is_absolute():
+        prompt_dest = root / prompt_dest
+    mcp_dest = root / "mcp" / "plugin.shared.mcp.json"
+    if fresh_config:
+        write_json(config_path, cfg)
+    if args.force or not prompt_dest.exists():
+        shutil.copyfile(prompt_source, prompt_dest)
+    if args.force or not mcp_dest.exists():
+        write_json(mcp_dest, {"mcpServers": selected})
+
+    # Fresh examples already point both arms at this shared file. If a customer
+    # supplied an existing plugin config, do not rewrite its arm definitions.
+    prompts = load_prompts(config_path, cfg)
+    print(json.dumps({
+        "config": str(config_path),
+        "prompt_file": str(prompt_dest),
+        "mcp_source": str(mcp_source),
+        "mcp_output": str(mcp_dest),
+        "servers_selected": list(selected),
+        "sensitive_fields_copied": sensitive_mcp_paths({"mcpServers": selected}),
+        "prompt_count": len(prompts),
+        "plugin": {
+            "id": (cfg.get("cursor_plugin") or {}).get("plugin_id"),
+            "version": (cfg.get("cursor_plugin") or {}).get("version"),
+            "state_control": "treatment loads --plugin-dir; control requires manual deactivation/uninstall",
+        },
+        "next": [
+            f"python3 scripts/glean_mcp_eval.py doctor --config {config_path.name}",
+            f"python3 scripts/glean_mcp_eval.py smoke-test --config {config_path.name} --participant-id user01",
+        ],
+        "warning": "Local MCP output may contain auth headers or client secrets; keep it ignored and do not commit it.",
+    }, indent=2))
+    return 0
+
+
 def results_dir(config_path: Path, cfg: Dict[str, Any]) -> Path:
     root = repo_root_for_config(config_path)
     return (root / cfg.get("results_dir", "results")).resolve()
@@ -2311,6 +2405,24 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--profile-file", default="config/server-profiles.example.json", help="Server profile JSON")
     sp.add_argument("--force", action="store_true", help="Overwrite generated local files")
     sp.set_defaults(func=command_setup)
+
+    sp = sub.add_parser("setup-cursor-plugin", help="Bootstrap a Cursor Glean plugin evaluation from ~/.cursor/mcp.json")
+    add_config(sp)
+    sp.add_argument(
+        "--source",
+        default=str(Path.home() / ".cursor" / "mcp.json"),
+        help="Cursor MCP config to read (default: ~/.cursor/mcp.json)",
+    )
+    sp.add_argument(
+        "--prompt-source",
+        help="Prompt TSV to copy; defaults to prompts/golden_prompts.cursor.plugin.example.tsv",
+    )
+    sp.add_argument(
+        "--servers",
+        help="Optional comma-separated subset of MCP server identifiers to copy",
+    )
+    sp.add_argument("--force", action="store_true", help="Replace local plugin config, prompt, and shared MCP files")
+    sp.set_defaults(func=command_setup_cursor_plugin)
 
     sp = sub.add_parser("setup-direct", help="Copy selected Claude Code MCP definitions into the strict direct-arm config")
     add_config(sp)

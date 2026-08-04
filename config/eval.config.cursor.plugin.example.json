@@ -3,7 +3,7 @@
   "eval_name": "cursor-glean-plugin-ab-eval",
   "host": "cursor",
   "mcp_mode": "strict",
-  "prompts_file": "golden_prompts.cursor.plugin.tsv",
+  "prompts_file": "golden_prompts.tsv",
   "results_dir": "results",
   "model": "claude-sonnet-5-high",
   "judge_model": "opus",

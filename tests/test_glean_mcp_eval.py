@@ -231,6 +231,45 @@ class SetupDirectTest(unittest.TestCase):
             self.assertEqual(rc, 2)
 
 
+class SetupCursorPluginTest(unittest.TestCase):
+    def test_setup_cursor_plugin_copies_selected_global_servers(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "config").mkdir()
+            (root / "prompts").mkdir()
+            (root / "config" / "eval.config.cursor.plugin.example.json").write_text(json.dumps({
+                "comparison": {"variant": "cursor-glean-plugin"},
+                "prompts_file": "golden_prompts.tsv",
+                "arms": {
+                    "treatment": {"expected_mcp_servers": ["glean_default", "slack"]},
+                    "control": {"expected_mcp_servers": ["glean_default", "slack"]},
+                },
+            }), encoding="utf-8")
+            (root / "prompts" / "golden_prompts.cursor.plugin.example.tsv").write_text(
+                "ID\tPrompt\nQ1\tQuestion?\n", encoding="utf-8"
+            )
+            source = root / "global-mcp.json"
+            source.write_text(json.dumps({
+                "mcpServers": {
+                    "glean_default": {"type": "http", "url": "https://glean.example/mcp"},
+                    "slack": {"type": "http", "url": "https://slack.example/mcp"},
+                    "ambient": {"type": "http", "url": "https://ambient.example/mcp"},
+                }
+            }), encoding="utf-8")
+            config = root / "eval.config.json"
+            rc = gme.main([
+                "setup-cursor-plugin",
+                "--config", str(config),
+                "--source", str(source),
+            ])
+            self.assertEqual(rc, 0)
+            self.assertTrue(config.exists())
+            self.assertTrue((root / "golden_prompts.tsv").exists())
+            generated = json.loads((root / "mcp" / "plugin.shared.mcp.json").read_text())
+            self.assertEqual(sorted(generated["mcpServers"]), ["glean_default", "slack"])
+            self.assertNotIn("ambient", generated["mcpServers"])
+
+
 class StrictMcpDiagnosticsTest(unittest.TestCase):
     def test_placeholder_mcp_config_fails_static_validation(self):
         with tempfile.TemporaryDirectory() as td:

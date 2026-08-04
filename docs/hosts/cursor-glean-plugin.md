@@ -52,23 +52,47 @@ changes.
 
 ## Setup
 
+From the cloned repository, run one bootstrap command:
+
 ```bash
-cp config/eval.config.cursor.plugin.example.json eval.config.json
-cp prompts/golden_prompts.cursor.plugin.example.tsv golden_prompts.tsv
-mkdir -p mcp
-cp config/mcp.cursor.plugin.shared.example.json mcp/plugin.shared.mcp.json
+python3 scripts/glean_mcp_eval.py setup-cursor-plugin \
+  --config eval.config.json
 ```
 
-Edit `mcp/plugin.shared.mcp.json`:
+By default it:
 
-- Set the Glean subdomain.
-- Copy the customer’s exact `github` and `google_drive` entries from
-  `~/.cursor/mcp.json` if those servers are part of the run.
-- Preserve the exact canonical server identifiers.
-- Do not commit auth headers, tokens, or customer URLs if they are sensitive.
+- Creates the ignored local `eval.config.json` from the plugin example.
+- Copies the ten-prompt starter pack to the configured prompt path.
+- Reads the customer’s exact MCP server entries from `~/.cursor/mcp.json`.
+- Writes one local shared MCP file at `mcp/plugin.shared.mcp.json` for both arms.
+- Copies no unrelated ambient servers.
+- Reports only server names and credential-field locations, never credential values.
 
-The config intentionally uses the same `mcp/plugin.shared.mcp.json` for both
-arms. The plugin is the experimental variable, not the MCP server set.
+If the customer’s Cursor MCP file is elsewhere, use:
+
+```bash
+python3 scripts/glean_mcp_eval.py setup-cursor-plugin \
+  --config eval.config.json \
+  --source /path/to/customer/mcp.json
+```
+
+If only a subset of the configured servers should be part of the evaluation,
+pass `--servers server_a,server_b`. The command stops with a clear list if a
+configured server is missing rather than writing a partially valid experiment.
+
+The customer still needs to review the prompt pack and replace the starter
+prompts with real customer engineering workflows where appropriate. The
+config intentionally uses the same shared MCP file for both arms; the plugin is
+the experimental variable, not the MCP server set.
+
+Optional explicit plugin path:
+
+```bash
+export CURSOR_GLEAN_PLUGIN_DIR="$HOME/.cursor/plugins/cache/gleanwork-glean-plugins-vnext/glean-vnext/<version-hash>"
+```
+
+If omitted, the evaluator discovers the newest matching `glean-vnext` plugin
+manifest under `~/.cursor/plugins/cache`.
 
 Optional explicit plugin path:
 
