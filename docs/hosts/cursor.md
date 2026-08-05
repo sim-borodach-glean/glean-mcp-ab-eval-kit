@@ -57,6 +57,8 @@ Then edit `mcp/glean.mcp.json` to point at your Glean subdomain.
   isn't already authenticated, the kit runs `cursor-agent mcp login <server>`.
   **A browser window may open for you to approve** — this is the only manual
   input a run needs. It prints `Authentication complete: <server>` per server.
+  When global MCP management is enabled, prompts reuse the repository Cursor
+  workspace so project-scoped OAuth/approval state is not lost on every new prompt.
 
 ## 3. Sanity check (no tokens), then preflight
 

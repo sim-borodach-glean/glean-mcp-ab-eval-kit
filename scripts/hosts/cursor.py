@@ -8,9 +8,11 @@ checkpoint, and stream-json routing evidence is recorded. See
 
 Key differences from Claude Code (from Cursor docs, 2026-07):
   - Command: `cursor-agent -p "<prompt>" --output-format stream-json --force --trust`.
-  - Isolation: no `--strict-mcp-config` flag. We isolate by pointing `--workspace`
-    at a per-run dir that contains only this arm's `.cursor/mcp.json`, plus a
-    `.cursor/cli.json` permissions block for read-only gating (deny wins).
+  - Isolation: no `--strict-mcp-config` flag. With global MCP management enabled,
+    the kit swaps the global config per arm and reuses the repository workspace so
+    Cursor's project-scoped OAuth state is preserved; a temporary `.cursor/cli.json`
+    permissions block provides read-only gating (deny wins). A per-run workspace is
+    used only when global MCP management is disabled.
   - Cost: NOT exposed by Cursor — `reported_cost_usd` is always None; the kit's
     list-price-normalized `computed_cost_usd` is the cross-host cost metric.
   - Token usage: available via the TypeScript SDK for certain; via CLI JSON it is
@@ -324,7 +326,13 @@ class CursorAdapter(HostAdapter):
         max_turns: Optional[int] = None,
         json_schema: Optional[Dict[str, Any]] = None,
     ) -> Tuple[List[str], Dict[str, Any]]:
-        ws = out_dir / "_cursor_ws"
+        use_global_mcp = bool(cfg.get("cursor_manage_global_mcp", True))
+        # When global MCP management is enabled, setup_arm has already swapped
+        # ~/.cursor/mcp.json to this arm's server set. Reusing the repository
+        # workspace preserves Cursor's project-scoped OAuth/approval state;
+        # creating a fresh workspace per prompt would make every MCP look
+        # unauthenticated again.
+        ws = root if use_global_mcp else out_dir / "_cursor_ws"
         disable_mcp = bool(arm_cfg.get("disable_mcp_for_answer"))
         cmd: List[str] = [
             "cursor-agent", "-p", prompt,
@@ -356,6 +364,7 @@ class CursorAdapter(HostAdapter):
         ctx = {
             "cwd": str(ws),
             "ws": str(ws),
+            "use_global_mcp": use_global_mcp,
             "servers": {} if disable_mcp else _load_arm_servers(root, arm_cfg),
             "permissions": _permissions_from_arm(arm_cfg, settings),
             "disable_global_mcp": disable_mcp,
@@ -371,12 +380,39 @@ class CursorAdapter(HostAdapter):
         ws = Path(ctx["ws"])
         cdir = ws / ".cursor"
         cdir.mkdir(parents=True, exist_ok=True)
-        (cdir / "mcp.json").write_text(
-            json.dumps({"mcpServers": ctx.get("servers", {})}, indent=2), encoding="utf-8"
-        )
-        (cdir / "cli.json").write_text(
+        restore: Dict[str, Optional[str]] = {}
+
+        # With global MCP management, the global file is the authoritative,
+        # already-authenticated arm config. A duplicate local mcp.json would be
+        # treated as a new Cursor project and require OAuth again.
+        mcp_path = cdir / "mcp.json"
+        if ctx.get("use_global_mcp"):
+            restore[str(mcp_path)] = mcp_path.read_text(encoding="utf-8") if mcp_path.exists() else None
+            if mcp_path.exists():
+                mcp_path.unlink()
+        else:
+            mcp_path.write_text(
+                json.dumps({"mcpServers": ctx.get("servers", {})}, indent=2), encoding="utf-8"
+            )
+
+        cli_path = cdir / "cli.json"
+        restore[str(cli_path)] = cli_path.read_text(encoding="utf-8") if cli_path.exists() else None
+        cli_path.write_text(
             json.dumps({"permissions": ctx.get("permissions", {})}, indent=2), encoding="utf-8"
         )
+        ctx["_restore_cursor_files"] = restore
+
+    def cleanup(self, ctx: Dict[str, Any]) -> None:
+        for raw_path, original in (ctx.pop("_restore_cursor_files", {}) or {}).items():
+            path = Path(raw_path)
+            if original is None:
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+            else:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(original, encoding="utf-8")
 
     # --- Per-arm isolation + auth -------------------------------------------
     # cursor-agent MERGES the global ~/.cursor/mcp.json into every run AND, under

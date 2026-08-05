@@ -90,6 +90,10 @@ class HostAdapter:
         per-arm `.cursor/mcp.json` + `cli.json`). Default: no-op."""
         return None
 
+    def cleanup(self, ctx: Dict[str, Any]) -> None:
+        """Optional: remove or restore files staged by prepare()."""
+        return None
+
     def suspend_mcp(self) -> None:
         """Optional: temporarily suspend host-global MCP state for one run."""
         return None

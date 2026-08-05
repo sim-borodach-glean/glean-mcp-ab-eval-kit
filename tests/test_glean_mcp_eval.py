@@ -420,6 +420,9 @@ class WrapperTest(unittest.TestCase):
         prompt = gme.build_prefetch_prompt({"Prompt": "Find issue status."}, tools)
         self.assertIn(tools[0], prompt)
         self.assertIn(tools[1], prompt)
+        self.assertIn("one at a time", prompt)
+        self.assertIn("do not issue parallel tool calls", prompt)
+        self.assertIn("getAccessibleAtlassianResources", prompt)
         record = {
             "success": True,
             "answer_text": "Evidence digest",
@@ -620,6 +623,8 @@ class HostAdapterTest(unittest.TestCase):
             cmd, ctx = gme.get_adapter("cursor").build_command(root, cfg, arm, "hi", root / "out")
             self.assertEqual(cmd[0], "cursor-agent")
             self.assertIn("--workspace", cmd)
+            self.assertEqual(ctx["ws"], str(root))
+            self.assertTrue(ctx["use_global_mcp"])
             self.assertIn("stream-json", cmd)
             # allow-list translated to Cursor rule grammar
             self.assertIn("Mcp(atlassian:search)", ctx["permissions"]["allow"])
@@ -627,6 +632,12 @@ class HostAdapterTest(unittest.TestCase):
             # read-only floor: writes/shell are always denied for an eval run
             self.assertIn("Write(**)", ctx["permissions"]["deny"])
             self.assertIn("Shell(**)", ctx["permissions"]["deny"])
+            adapter = cursor_host.CursorAdapter()
+            adapter.prepare(ctx)
+            self.assertTrue((root / ".cursor" / "cli.json").exists())
+            self.assertFalse((root / ".cursor" / "mcp.json").exists())
+            adapter.cleanup(ctx)
+            self.assertFalse((root / ".cursor" / "cli.json").exists())
 
 
 if __name__ == "__main__":
