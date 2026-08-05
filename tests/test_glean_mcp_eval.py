@@ -432,7 +432,11 @@ class WrapperTest(unittest.TestCase):
         }
         verification = gme.verify_prefetch_record(record, tools)
         self.assertTrue(verification["passed"])
-        self.assertIn("Evidence digest", gme.inject_prefetch_evidence("Question?", record, verification))
+        injected = gme.inject_prefetch_evidence(
+            "Question?", record, verification, "Use the digest and do not repeat broad searches."
+        )
+        self.assertIn("Evidence digest", injected)
+        self.assertIn("do not repeat broad searches", injected)
 
     def test_prefetch_verification_reports_missing_and_unexpected_tools(self):
         required = ["mcp__Atlassian-MCP-Server__searchJiraIssuesUsingJql"]
