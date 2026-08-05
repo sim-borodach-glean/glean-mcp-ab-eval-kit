@@ -90,6 +90,14 @@ class HostAdapter:
         per-arm `.cursor/mcp.json` + `cli.json`). Default: no-op."""
         return None
 
+    def suspend_mcp(self) -> None:
+        """Optional: temporarily suspend host-global MCP state for one run."""
+        return None
+
+    def restore_mcp(self) -> None:
+        """Optional: restore MCP state suspended for one run."""
+        return None
+
     def setup_arm(self, root: Path, cfg: Dict[str, Any], arm_cfg: Dict[str, Any], arm_name: str) -> None:
         """Optional: prepare host-global state before an arm's prompts run
         (e.g. Cursor isolates by enabling only this arm's MCP servers and

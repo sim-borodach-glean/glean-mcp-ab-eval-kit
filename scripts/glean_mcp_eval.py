@@ -1048,9 +1048,16 @@ def run_claude_and_record(
         write_json(out_dir / "run.json", result)
         return result
     adapter.prepare(ctx)
+    suspended_mcp = bool(ctx.get("disable_global_mcp"))
+    if suspended_mcp:
+        adapter.suspend_mcp()
     started_at = now_iso()
     cwd = Path(ctx["cwd"]) if ctx.get("cwd") else root
-    proc = run_subprocess(cmd, cwd=cwd, timeout=timeout)
+    try:
+        proc = run_subprocess(cmd, cwd=cwd, timeout=timeout)
+    finally:
+        if suspended_mcp:
+            adapter.restore_mcp()
     write_text(out_dir / "stdout.txt", proc.get("stdout") or "")
     write_text(out_dir / "stderr.txt", proc.get("stderr") or "")
     write_json(out_dir / "command.json", {"cmd": cmd, "cwd": str(cwd), "started_at": started_at, "subprocess": proc})
@@ -1425,6 +1432,7 @@ def synthesis_arm_config(cfg: Dict[str, Any], arm_cfg: Dict[str, Any]) -> Dict[s
     if (cfg.get("prefetch") or {}).get("answer_mcp_tools") != "none":
         return arm_cfg
     answer_cfg = copy.deepcopy(arm_cfg)
+    answer_cfg["disable_mcp_for_answer"] = True
     allowed = list(answer_cfg.get("allowed_tools") or [])
     answer_cfg["allowed_tools"] = []
     denied = list(answer_cfg.get("disallowed_tools") or [])

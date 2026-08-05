@@ -325,13 +325,15 @@ class CursorAdapter(HostAdapter):
         json_schema: Optional[Dict[str, Any]] = None,
     ) -> Tuple[List[str], Dict[str, Any]]:
         ws = out_dir / "_cursor_ws"
+        disable_mcp = bool(arm_cfg.get("disable_mcp_for_answer"))
         cmd: List[str] = [
             "cursor-agent", "-p", prompt,
             "--output-format", "stream-json",  # per-event; lets us capture model + usage + tool calls
             "--force", "--trust",              # fully unattended (no approval / trust prompts)
-            "--approve-mcps",                  # load the (arm-only) MCP servers without interactive approval
-            "--workspace", str(ws),
         ]
+        if not disable_mcp:
+            cmd.append("--approve-mcps")       # load the arm-only MCP servers without interactive approval
+        cmd.extend(["--workspace", str(ws)])
         settings = _plugin_settings(cfg, arm_cfg)
         required_plugin_state = _plugin_state(arm_cfg, settings)
         plugin_dir = None
@@ -354,8 +356,9 @@ class CursorAdapter(HostAdapter):
         ctx = {
             "cwd": str(ws),
             "ws": str(ws),
-            "servers": _load_arm_servers(root, arm_cfg),
+            "servers": {} if disable_mcp else _load_arm_servers(root, arm_cfg),
             "permissions": _permissions_from_arm(arm_cfg, settings),
+            "disable_global_mcp": disable_mcp,
             "raw_output_path": str(out_dir / "cursor_output.json"),
             "plugin_state": required_plugin_state,
             "plugin_server_ids": sorted(_plugin_server_ids(settings)),
@@ -390,10 +393,25 @@ class CursorAdapter(HostAdapter):
     _GLOBAL_MCP = Path.home() / ".cursor" / "mcp.json"
     _mcp_managed: bool = False
     _mcp_backup: Optional[str] = None
+    _answer_mcp_backup: Optional[str] = None
     # Reuse one manual confirmation across preflight + run when `run-all` or
     # `smoke-test` invokes both in the same process. A separate CLI invocation
     # asks again, which is intentional because Desktop state may have changed.
     _plugin_checkpoints: Dict[Tuple[str, str], bool] = {}
+
+    def suspend_mcp(self) -> None:
+        """Hide the arm's global MCPs during a synthesis-only subprocess."""
+        if self._answer_mcp_backup is not None or not self._GLOBAL_MCP.exists():
+            return
+        self._answer_mcp_backup = self._GLOBAL_MCP.read_text(encoding="utf-8")
+        self._GLOBAL_MCP.write_text(json.dumps({"mcpServers": {}}, indent=2), encoding="utf-8")
+
+    def restore_mcp(self) -> None:
+        """Restore the arm MCPs after a synthesis-only subprocess."""
+        if self._answer_mcp_backup is None:
+            return
+        self._GLOBAL_MCP.write_text(self._answer_mcp_backup, encoding="utf-8")
+        self._answer_mcp_backup = None
 
     def _arm_server_ids(self, arm_cfg: Dict[str, Any]) -> List[str]:
         """Server identifiers this arm needs, in the exact case cursor-agent

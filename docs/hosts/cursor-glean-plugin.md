@@ -125,10 +125,10 @@ is now part of every shared plan so both arms have the same Glean baseline. The
 treatment plan additionally invokes the `/glean_run` skill and requires the
 plugin `setup` and `search` provider events; control has no plugin additions.
 The injected `answer_instruction` keeps synthesis bounded by the verified
-prefetch evidence instead of starting a second broad retrieval loop. Cursor may
-still make a bounded read-only lookup during synthesis when the answer
-instruction identifies a missing fact; actual answer-session calls remain
-recorded separately from the verified prefetch phase. The example uses short
+prefetch evidence instead of starting a second broad retrieval loop. The
+example sets `answer_mcp_tools: none`; the runner gives the synthesis session an
+empty MCP workspace and temporarily suspends global MCP state, so all retrieval
+for the comparison happens in the verified prefetch phase. The example uses short
 `prefetch.query_by_prompt` terms so
 one broad question cannot consume the entire prefetch timeout before the other
 required tools run. Add a plan under `prefetch.tool_plan_by_prompt` only for
