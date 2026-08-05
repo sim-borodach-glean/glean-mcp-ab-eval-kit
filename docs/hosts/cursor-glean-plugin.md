@@ -128,8 +128,10 @@ The injected `answer_instruction` keeps synthesis bounded by the verified
 prefetch evidence instead of starting a second broad retrieval loop. The example
 also sets `answer_mcp_tools: none`, so the synthesis session cannot make a
 second uncontrolled MCP call; all retrieval for the comparison happens in the
-verified prefetch phase. Add a plan under
-`prefetch.tool_plan_by_prompt` only for tools present in the arm allowlist.
+verified prefetch phase. The example uses short `prefetch.query_by_prompt` terms so
+one broad question cannot consume the entire prefetch timeout before the other
+required tools run. Add a plan under `prefetch.tool_plan_by_prompt` only for
+tools present in the arm allowlist.
 Existing successful rows are skipped, so use `--rerun-existing` after enabling
 or changing a prefetch plan.
 

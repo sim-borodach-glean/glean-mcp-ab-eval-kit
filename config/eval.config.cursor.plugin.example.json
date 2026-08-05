@@ -49,6 +49,18 @@
     "instruction": "Use the tool schemas to form valid read-only search arguments. Return evidence and citations only; do not answer from memory.",
     "answer_instruction": "Use the verified prefetch evidence as the primary source for this answer. Do not repeat broad searches or redo the prefetch calls. Only perform an additional read-only lookup if a specific requested fact is missing, then keep the answer focused and cite the available evidence.",
     "answer_mcp_tools": "none",
+    "query_by_prompt": {
+      "ENG_001": "Glean MCP server status releases risks",
+      "ENG_002": "Glean Cursor integration implementation limitations",
+      "ENG_003": "open MCP Cursor retrieval engineering issues",
+      "ENG_004": "MCP Cursor routing design decisions",
+      "ENG_005": "MCP connectors Cursor retrieval routing releases pull requests",
+      "ENG_006": "MCP connectivity authentication routing retrieval incident",
+      "ENG_007": "MCP Cursor integration next actions owners dependencies",
+      "IT_001": "access management provisioning policy service credentials",
+      "PM_001": "Cursor Glean plugin rollout readiness",
+      "SEC_002": "OAuth MCP connector authentication token expiry"
+    },
     "instruction_by_arm": {
       "treatment": "Begin with the /glean_run skill. Use the Glean plugin's read-only setup and search workflow for the Glean portion of this question. The plugin setup and plugin search calls are required; do not substitute ordinary Glean for those plugin calls."
     },
