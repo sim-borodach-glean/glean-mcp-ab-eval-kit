@@ -482,6 +482,16 @@ class WrapperTest(unittest.TestCase):
         self.assertEqual(record["transcript"]["prefetch_mcp_servers_used"], {"slack": 1})
         self.assertEqual(verification["tool_call_count"], 1)
 
+    def test_synthesis_arm_config_can_disable_answer_mcp_tools(self):
+        arm = {
+            "allowed_tools": ["mcp__glean_default__search"],
+            "disallowed_tools": ["mcp__glean_default__run_tool"],
+        }
+        answer = gme.synthesis_arm_config({"prefetch": {"answer_mcp_tools": "none"}}, arm)
+        self.assertEqual(answer["allowed_tools"], [])
+        self.assertIn("mcp__glean_default__search", answer["disallowed_tools"])
+        self.assertEqual(arm["allowed_tools"], ["mcp__glean_default__search"])
+
 
 class BootstrapTest(unittest.TestCase):
     def test_constant_savings_gives_tight_ci(self):

@@ -1414,6 +1414,21 @@ def merge_prefetch_into_record(
     return record
 
 
+def synthesis_arm_config(cfg: Dict[str, Any], arm_cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the answer-session arm config after optional prefetch gating."""
+    if (cfg.get("prefetch") or {}).get("answer_mcp_tools") != "none":
+        return arm_cfg
+    answer_cfg = copy.deepcopy(arm_cfg)
+    allowed = list(answer_cfg.get("allowed_tools") or [])
+    answer_cfg["allowed_tools"] = []
+    denied = list(answer_cfg.get("disallowed_tools") or [])
+    for tool in allowed:
+        if tool not in denied:
+            denied.append(tool)
+    answer_cfg["disallowed_tools"] = denied
+    return answer_cfg
+
+
 def latest_preflight_path(config_path: Path, cfg: Dict[str, Any], arm: str) -> Path:
     return results_dir(config_path, cfg) / "_preflight" / arm / "latest.json"
 
@@ -1587,7 +1602,7 @@ def command_run(args: argparse.Namespace) -> int:
         rec = run_claude_and_record(
             root,
             cfg,
-            acfg,
+            synthesis_arm_config(cfg, acfg),
             prompt_text,
             run_dir,
             timeout=int(cfg.get("run_timeout_seconds", 1800)),

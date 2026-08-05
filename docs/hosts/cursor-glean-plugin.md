@@ -125,7 +125,10 @@ is now part of every shared plan so both arms have the same Glean baseline. The
 treatment plan additionally invokes the `/glean_run` skill and requires the
 plugin `setup` and `search` provider events; control has no plugin additions.
 The injected `answer_instruction` keeps synthesis bounded by the verified
-prefetch evidence instead of starting a second broad retrieval loop. Add a plan under
+prefetch evidence instead of starting a second broad retrieval loop. The example
+also sets `answer_mcp_tools: none`, so the synthesis session cannot make a
+second uncontrolled MCP call; all retrieval for the comparison happens in the
+verified prefetch phase. Add a plan under
 `prefetch.tool_plan_by_prompt` only for tools present in the arm allowlist.
 Existing successful rows are skipped, so use `--rerun-existing` after enabling
 or changing a prefetch plan.
