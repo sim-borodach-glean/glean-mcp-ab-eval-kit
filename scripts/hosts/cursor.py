@@ -662,6 +662,7 @@ class CursorAdapter(HostAdapter):
             "mcp_servers_used": mcp_servers_used,
             "plugin_tool_call_count": len(plugin_calls),
             "plugin_servers_used": plugin_servers_used,
+            "plugin_loaded": bool(ctx.get("plugin_dir")),
             "plugin_tool_names": sorted(str(tc.get("name") or "") for tc in plugin_calls),
             "plugin_state_expected": required_plugin_state,
             "plugin_present_when_disabled": required_plugin_state == "disabled" and plugin_observed,
@@ -689,13 +690,16 @@ class CursorAdapter(HostAdapter):
 
     def doctor(self, root: Path) -> Dict[str, Any]:
         present = self.executable_present()
-        plugin_dir = _discover_plugin_dir({"plugin_id": "glean-vnext", "auto_discover": True})
+        plugin_dir = (
+            _discover_plugin_dir({"plugin_id": "glean", "auto_discover": True})
+            or _discover_plugin_dir({"plugin_id": "glean-vnext", "auto_discover": True})
+        )
         manifest = _plugin_manifest(plugin_dir) if plugin_dir else {}
         return {
             "cursor_agent_on_path": shutil.which("cursor-agent"),
             "caps": self.caps,
             "plugin_inventory": {
-                "plugin_id": manifest.get("name") if manifest else "glean-vnext",
+                "plugin_id": manifest.get("name") if manifest else "glean",
                 "version": manifest.get("version") if manifest else None,
                 "path": str(plugin_dir) if plugin_dir else None,
                 "installed": bool(plugin_dir),

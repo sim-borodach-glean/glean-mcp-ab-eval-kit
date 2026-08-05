@@ -40,15 +40,16 @@ The intended order is treatment first, then control:
 
 ### Plugin identity used by this variant
 
-The observed local plugin is:
+The observed official plugin is:
 
-- Plugin ID: `glean-vnext`
-- Plugin server: `plugin-glean-vnext-glean`
-- Skill: `glean_run`
+- Plugin ID: `glean`
+- Display name: `Glean`
+- Version: `2.1.0`
+- MCP server: none — the plugin supplies skills, agents, commands, and rules
 
-Verify the customer’s installed version before a customer-facing run. The
-example currently records `0.2.42`; update the config if the tested version
-changes.
+The separate `glean-vnext` plugin is a different experimental plugin and must
+not be used for this variant. Verify the customer’s installed official version
+before a customer-facing run; update the config if it changes.
 
 ## Setup
 
@@ -122,8 +123,10 @@ This reuses Cursor's existing OAuth session. It is deterministic at the
 verified-tool level, but Cursor still supplies valid query arguments and
 returns the evidence; it is not a direct MCP HTTP client. Ordinary Glean search
 is now part of every shared plan so both arms have the same Glean baseline. The
-treatment plan additionally invokes the `/glean_run` skill and requires the
-plugin `setup` and `search` provider events; control has no plugin additions.
+official plugin supplies skills, agents, commands, and rules rather than a
+separate plugin MCP server, so treatment must not require
+`plugin-glean-vnext-glean` setup/search provider events; control has the plugin
+removed.
 The injected `answer_instruction` keeps synthesis bounded by the verified
 prefetch evidence instead of starting a second broad retrieval loop. The
 example sets `answer_mcp_tools: none`; the runner gives the synthesis session an
@@ -139,11 +142,11 @@ or changing a prefetch plan.
 Optional explicit plugin path:
 
 ```bash
-export CURSOR_GLEAN_PLUGIN_DIR="$HOME/.cursor/plugins/cache/gleanwork-glean-plugins-vnext/glean-vnext/<version-hash>"
+export CURSOR_GLEAN_PLUGIN_DIR="$HOME/.cursor/plugins/cache/cursor-public/glean/<version-hash>"
 ```
 
-If omitted, the evaluator discovers the newest matching `glean-vnext` plugin
-manifest under `~/.cursor/plugins/cache`.
+If omitted, the evaluator discovers the newest matching `glean` plugin manifest
+under `~/.cursor/plugins/cache`.
 
 ## Doctor and dry run
 
@@ -281,11 +284,11 @@ CLI configuration.
 
 ### `plugin_server_not_observed`
 
-The treatment ran, but the expected plugin MCP server was not observed. Check
-that the prompt actually exercises plugin discovery, that the plugin version is
-correct, and that the `plugin-glean-vnext-glean` server is present in the live
-transcript. Do not classify this as a plugin-quality result until routing is
-understood.
+The treatment ran, but the expected official plugin behavior was not
+observed. Confirm that the configured `glean` plugin directory and version are
+present and that the live transcript shows the expected Glean/Atlassian routing.
+The official plugin does not emit a `plugin-glean-vnext-glean` MCP server event;
+do not use that event as its treatment gate.
 
 ### OAuth or connector authentication failures
 

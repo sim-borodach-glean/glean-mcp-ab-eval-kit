@@ -1136,9 +1136,10 @@ def command_preflight(args: argparse.Namespace) -> int:
         if isinstance(plugin_id_values, str):
             plugin_id_values = [plugin_id_values]
         plugin_ids = {normalize_server_name(str(x)) for x in plugin_id_values if x}
+        plugin_loaded = bool(live_transcript.get("plugin_loaded"))
         plugin_observed = bool(live_transcript.get("plugin_servers_used")) or bool(
             plugin_ids & set(observed)
-        )
+        ) or (required_plugin_state == "enabled" and not plugin_ids and plugin_loaded)
         if required_plugin_state == "disabled" and plugin_observed:
             plugin_live_flags.append("plugin_present_when_disabled")
         if (
@@ -1163,6 +1164,7 @@ def command_preflight(args: argparse.Namespace) -> int:
         "live_pass": live_pass,
         "live_missing_required_servers": missing_live_required,
         "plugin_observed": plugin_observed,
+        "plugin_loaded": bool((live_record or {}).get("transcript", {}).get("plugin_loaded")),
         "plugin_live_flags": plugin_live_flags,
         "live_record": live_record,
         "pass": overall_pass,
@@ -1178,6 +1180,7 @@ def command_preflight(args: argparse.Namespace) -> int:
         "live_pass": live_pass,
         "live_missing_required_servers": missing_live_required,
         "plugin_observed": plugin_observed,
+        "plugin_loaded": bool((live_record or {}).get("transcript", {}).get("plugin_loaded")),
         "plugin_live_flags": plugin_live_flags,
     }
     if args.dry_run:

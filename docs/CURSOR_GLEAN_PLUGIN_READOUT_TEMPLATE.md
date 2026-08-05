@@ -16,8 +16,8 @@ material benefit demonstrated / inconclusive].
 
 - Cursor version: `[version]`
 - Cursor agent version: `[version]`
-- Glean plugin: `glean-vnext [version]`
-- Plugin server: `plugin-glean-vnext-glean`
+- Glean plugin: `glean [version]`
+- Plugin server: none (official plugin supplies skills, agents, commands, and rules)
 - Model: `[model]`
 - Participant/sample: `[participant count and IDs]`
 - Prompt count: `[N]`

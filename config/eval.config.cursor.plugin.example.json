@@ -1,5 +1,5 @@
 {
-  "_comment": "Cursor Glean plugin A/B: treatment has the Glean vNext plugin loaded via --plugin-dir; control has the same shared MCP environment but requires the tester to deactivate/uninstall the plugin manually. This is a separate variant from the legacy glean/direct MCP comparison.",
+  "_comment": "Cursor Glean plugin A/B: treatment has the official Glean plugin loaded via --plugin-dir; control has the same shared MCP environment but requires the tester to deactivate/uninstall the plugin manually. This is a separate variant from the legacy glean/direct MCP comparison.",
   "eval_name": "cursor-glean-plugin-ab-eval",
   "host": "cursor",
   "mcp_mode": "strict",
@@ -26,18 +26,17 @@
     "extended_scoring": true
   },
   "cursor_plugin": {
-    "plugin_id": "glean-vnext",
-    "version": "0.2.42",
-    "server_identifier": "plugin-Glean vNext-glean",
+    "plugin_id": "glean",
+    "version": "2.1.0",
     "activation_mode": "plugin-dir",
     "plugin_dir_env": "CURSOR_GLEAN_PLUGIN_DIR",
     "auto_discover": true,
     "manual_confirmation": true,
-    "require_plugin_server_in_preflight": true,
+    "require_plugin_server_in_preflight": false,
     "require_plugin_route": false,
     "glean_mcp_server_identifiers": ["glean_default", "glean"],
-    "enable_instruction": "install or enable the Glean vNext Cursor plugin",
-    "disable_instruction": "deactivate or uninstall the Glean vNext Cursor plugin in Cursor Desktop"
+    "enable_instruction": "install or enable the official Glean Cursor plugin",
+    "disable_instruction": "deactivate or uninstall the official Glean Cursor plugin in Cursor Desktop"
   },
   "prompt_wrapper": "Answer the following enterprise knowledge question. This task is STRICTLY READ-ONLY: use only search and read tools to find current, grounded sources. Never create, edit, comment on, transition, delete, or otherwise modify any content, and never use a write action as a workaround to reach data. Cite source names/URLs when available. If you cannot find enough evidence, say what is missing.\n\nQuestion:\n{prompt}",
   "prompt_routing_instruction": "Use the available source-specific read-only MCP tools for the source systems named below. In particular, use Atlassian MCP for Jira or Confluence, Slack MCP for Slack, and GitHub MCP for pull requests or code. Do not rely solely on generic Glean retrieval when a named source-specific MCP is available; use the relevant direct source and cite it. If a listed source is unavailable or has no relevant evidence, say so instead of inventing a result.\n\nExpected source systems for this question: {expected_evidence}",
@@ -62,13 +61,10 @@
       "SEC_002": "OAuth MCP connector authentication token expiry"
     },
     "instruction_by_arm": {
-      "treatment": "Begin with the /glean_run skill. Use the Glean plugin's read-only setup and search workflow for the Glean portion of this question. The plugin setup and plugin search calls are required; do not substitute ordinary Glean for those plugin calls."
+      "treatment": "Use the official Glean Cursor plugin's read-only search skill/workflow for the Glean portion. The official plugin has no separate plugin MCP server; continue through every direct-source tool in the numbered plan and do not return early."
     },
     "additional_tools_by_arm": {
-      "treatment": [
-        "mcp__plugin-Glean vNext-glean__setup",
-        "mcp__plugin-Glean vNext-glean__search"
-      ]
+      "treatment": []
     },
     "tool_plan_by_prompt": {
       "ENG_001": [
@@ -141,16 +137,8 @@
       "mcp_config": "mcp/plugin.shared.mcp.json",
       "expected_mcp_servers": ["glean_default", "Atlassian-MCP-Server", "slack", "github", "google_drive"],
       "forbidden_mcp_servers": ["notion", "gmail", "outlook", "zoom", "salesforce"],
-      "require_live_tool_servers": ["plugin-glean-vnext-glean", "glean_default", "Atlassian-MCP-Server", "slack"],
+      "require_live_tool_servers": ["glean_default", "Atlassian-MCP-Server", "slack"],
       "allowed_tools": [
-        "mcp__plugin-glean-vnext-glean__setup",
-        "mcp__plugin-glean-vnext-glean__find_skills",
-        "mcp__plugin-glean-vnext-glean__read_skill_files",
-        "mcp__plugin-glean-vnext-glean__search",
-        "mcp__plugin-glean-vnext-glean__read_document",
-        "mcp__plugin-glean-vnext-glean__code_search",
-        "mcp__plugin-glean-vnext-glean__employee_search",
-        "mcp__plugin-glean-vnext-glean__chat",
         "mcp__glean_default__search",
         "mcp__glean_default__read_document",
         "mcp__glean_default__chat",
@@ -172,8 +160,6 @@
         "mcp__slack__slack_read_thread"
       ],
       "disallowed_tools": [
-        "mcp__plugin-glean-vnext-glean__run_tool",
-        "mcp__plugin-glean-vnext-glean__memory",
         "mcp__glean_default__run_tool",
         "mcp__glean_default__find_skills",
         "mcp__glean_default__read_skill_files",
@@ -186,7 +172,7 @@
         "mcp__slack__slack_schedule_message",
         "mcp__slack__slack_create_canvas"
       ],
-      "preflight_prompt": "Use the Glean Cursor plugin's glean_run capability to perform one harmless read-only discovery for the term \"MCP\". Then use the ordinary Glean MCP search for \"MCP\", the Atlassian search tool for \"policy\", and Slack public search for \"hello\". Return one short line per capability stating whether it returned results. Do not write anything.",
+      "preflight_prompt": "Use the official Glean Cursor plugin's read-only search skill/workflow for the term \"MCP\". Then use ordinary Glean MCP search for \"MCP\", the Atlassian search tool for \"policy\", and the direct Slack MCP tool mcp__slack__slack_search_public with query \"hello\". The official plugin has no separate plugin MCP server; do not look for a plugin-glean server. Return one short line per capability stating whether it returned results. Do not write anything.",
       "cursor_plugin": {
         "manual_confirmation": false
       }
