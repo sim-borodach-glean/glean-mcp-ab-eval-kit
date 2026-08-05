@@ -43,10 +43,19 @@
   "prompt_routing_instruction": "Use the available source-specific read-only MCP tools for the source systems named below. In particular, use Atlassian MCP for Jira or Confluence, Slack MCP for Slack, and GitHub MCP for pull requests or code. Do not rely solely on generic Glean retrieval when a named source-specific MCP is available; use the relevant direct source and cite it. If a listed source is unavailable or has no relevant evidence, say so instead of inventing a result.\n\nExpected source systems for this question: {expected_evidence}",
   "prefetch": {
     "enabled": true,
-    "strict": true,
+    "strict": false,
     "timeout_seconds": 300,
     "max_turns": 8,
     "instruction": "Use the tool schemas to form valid read-only search arguments. Return evidence and citations only; do not answer from memory.",
+    "instruction_by_arm": {
+      "treatment": "Begin with the /glean_run skill. Use the Glean plugin's read-only setup and search workflow for the Glean portion of this question. The plugin setup and plugin search calls are required; do not substitute ordinary Glean for those plugin calls."
+    },
+    "additional_tools_by_arm": {
+      "treatment": [
+        "mcp__plugin-Glean vNext-glean__setup",
+        "mcp__plugin-Glean vNext-glean__search"
+      ]
+    },
     "tool_plan_by_prompt": {
       "ENG_001": [
         "mcp__glean_default__search",

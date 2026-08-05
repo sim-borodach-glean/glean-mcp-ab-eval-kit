@@ -111,14 +111,19 @@ prompt—currently ordinary Glean search plus Jira/Confluence through Atlassian
 and Slack through Slack. The runner verifies the observed tool names, saves the
 prefetch transcript under
 `results/<participant>/<arm>/<prompt>/prefetch/`, and injects the returned
-evidence digest into the answer prompt. If a required tool is missing or an
-unexpected MCP tool is used in strict mode, the prompt stops rather than being
-scored.
+evidence digest into the answer prompt. If a required tool is missing, the
+prompt stops rather than being scored. The example uses `strict: false`
+because Cursor emits automatic tool-discovery and helper calls; those
+unexpected calls are recorded as warnings in `verification.json`. Set
+`strict: true` only when the Cursor build's discovery behavior is part of the
+plan.
 
 This reuses Cursor's existing OAuth session. It is deterministic at the
 verified-tool level, but Cursor still supplies valid query arguments and
 returns the evidence; it is not a direct MCP HTTP client. Ordinary Glean search
-is now part of every shared plan so both arms have the same Glean baseline.
+is now part of every shared plan so both arms have the same Glean baseline. The
+treatment plan additionally invokes the `/glean_run` skill and requires the
+plugin `setup` and `search` provider events; control has no plugin additions.
 Add a plan under
 `prefetch.tool_plan_by_prompt` only for tools present in the arm allowlist.
 Existing successful rows are skipped, so use `--rerun-existing` after enabling

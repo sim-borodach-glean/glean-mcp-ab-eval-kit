@@ -1268,12 +1268,20 @@ def prefetch_tool_plan(cfg: Dict[str, Any], arm: str, prompt_id: str) -> List[st
     if plan is None:
         plan = (settings.get("tool_plan_by_prompt") or {}).get(prompt_id)
     if plan is None:
-        return []
+        plan = []
     if not isinstance(plan, list) or not all(isinstance(item, str) and item.strip() for item in plan):
         raise EvalError(
-            f"Prefetch tool plan for arm {arm!r}, prompt {prompt_id!r} must be a non-empty list of tool names."
+            f"Prefetch tool plan for arm {arm!r}, prompt {prompt_id!r} must be a list of tool names."
         )
-    return [item.strip() for item in plan]
+    extras = (settings.get("additional_tools_by_arm") or {}).get(arm) or []
+    if not isinstance(extras, list) or not all(isinstance(item, str) and item.strip() for item in extras):
+        raise EvalError(f"Prefetch additional tools for arm {arm!r} must be a list of tool names.")
+    result = []
+    for item in [*plan, *extras]:
+        item = item.strip()
+        if item and item not in result:
+            result.append(item)
+    return result
 
 
 def build_prefetch_prompt(row: Dict[str, str], required_tools: List[str], instruction: str = "") -> str:
@@ -1353,7 +1361,11 @@ def merge_prefetch_into_record(
     record["computed_cost_usd"] = round(cost_for_usage(cfg, combined_usage), 6)
 
     main_duration = record.get("duration_ms_reported_by_claude") or 0
-    prefetch_duration = prefetch_record.get("duration_ms") or 0
+    prefetch_duration = (
+        prefetch_record.get("duration_ms")
+        or prefetch_record.get("duration_ms_reported_by_claude")
+        or 0
+    )
     record["duration_ms_reported_by_claude"] = main_duration + prefetch_duration
 
     main_transcript = record.get("transcript") or {}
@@ -1372,9 +1384,21 @@ def merge_prefetch_into_record(
     main_transcript["retrieval_attempted"] = bool(combined_calls)
     main_transcript["prefetch_mcp_servers_used"] = prefetch_transcript.get("mcp_servers_used") or {}
     main_transcript["prefetch_tool_call_count"] = len(prefetch_calls)
-    # Keep routing_outcome/plugin_servers_used from the answer session: prefetch
-    # is deliberately identical in both arms and must not manufacture plugin
-    # routing evidence.
+    answer_plugin_servers = main_transcript.get("plugin_servers_used") or {}
+    prefetch_plugin_servers = prefetch_transcript.get("plugin_servers_used") or {}
+    combined_plugins = Counter(answer_plugin_servers)
+    combined_plugins.update(prefetch_plugin_servers)
+    main_transcript["answer_plugin_servers_used"] = dict(answer_plugin_servers)
+    main_transcript["prefetch_plugin_servers_used"] = dict(prefetch_plugin_servers)
+    main_transcript["plugin_servers_used"] = dict(combined_plugins)
+    main_transcript["plugin_tool_call_count"] = (
+        main_transcript.get("plugin_tool_call_count", 0)
+        + prefetch_transcript.get("plugin_tool_call_count", 0)
+    )
+    main_transcript["answer_routing_outcome"] = main_transcript.get("routing_outcome")
+    main_transcript["prefetch_routing_outcome"] = prefetch_transcript.get("routing_outcome")
+    if prefetch_plugin_servers:
+        main_transcript["plugin_required_but_unobserved"] = False
     record["transcript"] = main_transcript
     verification["duration_ms"] = prefetch_duration
     verification["total_tokens"] = usage_total_tokens(prefetch_usage)
@@ -1508,10 +1532,12 @@ def command_run(args: argparse.Namespace) -> int:
                 )
             prefetch_settings = cfg.get("prefetch") or {}
             prefetch_dir = run_dir / "prefetch"
+            arm_instructions = prefetch_settings.get("instruction_by_arm") or {}
+            prefetch_instruction = arm_instructions.get(args.arm, prefetch_settings.get("instruction", ""))
             prefetch_prompt = build_prefetch_prompt(
                 row,
                 prefetch_tools,
-                str(prefetch_settings.get("instruction") or ""),
+                str(prefetch_instruction or ""),
             )
             print(
                 f"    prefetch: requiring {len(prefetch_tools)} exact MCP tool(s) "

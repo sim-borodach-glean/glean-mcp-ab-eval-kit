@@ -410,9 +410,13 @@ class WrapperTest(unittest.TestCase):
                 "enabled": True,
                 "strict": True,
                 "tool_plan_by_prompt": {"Q1": tools},
+                "additional_tools_by_arm": {"treatment": ["mcp__plugin-Glean vNext-glean__search"]},
             }
         }
-        self.assertEqual(gme.prefetch_tool_plan(cfg, "treatment", "Q1"), tools)
+        self.assertEqual(
+            gme.prefetch_tool_plan(cfg, "treatment", "Q1"),
+            tools + ["mcp__plugin-Glean vNext-glean__search"],
+        )
         prompt = gme.build_prefetch_prompt({"Prompt": "Find issue status."}, tools)
         self.assertIn(tools[0], prompt)
         self.assertIn(tools[1], prompt)
